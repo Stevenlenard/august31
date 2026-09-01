@@ -614,25 +614,34 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
           const Text("Upcoming truck service dates", style: TextStyle(color: Colors.grey, fontSize: 13)),
           const SizedBox(height: 20),
           StreamBuilder(
-            stream: _database.ref('trucks/$truckId/maintenance').onValue,
-            builder: (context, snapshot) {
-              if (snapshot.hasError) return Text("Error: ${snapshot.error}");
-              if (!snapshot.hasData || snapshot.data!.snapshot.value == null) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              
-              final Map data = snapshot.data!.snapshot.value as Map;
-              
-              return Column(
-                children: [
-                  _buildMaintenanceItem("Oil Change", data['oilChange'], "oilChange", truckId),
-                  const SizedBox(height: 12),
-                  _buildMaintenanceItem("Tire Rotation", data['tireRotation'], "tireRotation", truckId),
-                  const SizedBox(height: 12),
-                  _buildMaintenanceItem("Full Inspection", data['fullInspection'], "fullInspection", truckId),
-                ],
+            stream: _database.ref('truck_locations/$truckId').onValue,
+            builder: (context, locSnapshot) {
+              final double activeTripDistance = (locSnapshot.hasData && locSnapshot.data!.snapshot.exists) 
+                ? (locSnapshot.data!.snapshot.value as Map)['distance']?.toDouble() ?? 0.0 
+                : 0.0;
+
+              return StreamBuilder(
+                stream: _database.ref('trucks/$truckId/maintenance').onValue,
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) return Text("Error: ${snapshot.error}");
+                  if (!snapshot.hasData || snapshot.data!.snapshot.value == null) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  
+                  final Map data = snapshot.data!.snapshot.value as Map;
+                  
+                  return Column(
+                    children: [
+                      _buildMaintenanceItem("Oil Change", data['oilChange'], "oilChange", truckId, activeTripDistance),
+                      const SizedBox(height: 12),
+                      _buildMaintenanceItem("Tire Rotation", data['tireRotation'], "tireRotation", truckId, activeTripDistance),
+                      const SizedBox(height: 12),
+                      _buildMaintenanceItem("Full Inspection", data['fullInspection'], "fullInspection", truckId, activeTripDistance),
+                    ],
+                  );
+                },
               );
-            },
+            }
           )
         ],
       );
@@ -641,17 +650,26 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     }
   }
 
-  Widget _buildMaintenanceItem(String title, dynamic item, String key, String truckId) {
+  Widget _buildMaintenanceItem(String title, dynamic item, String key, String truckId, double activeTripDistance) {
     if (item == null) return const SizedBox.shrink();
     
-    double remaining = (item['remainingKm'] ?? 0.0).toDouble();
-    if (remaining < 0) remaining = 0.0;
+    // Live calculation: savedRemaining - currentActiveTrip
+    double savedRemaining = (item['remainingKm'] ?? 0.0).toDouble();
+    double displayedRemaining = savedRemaining - activeTripDistance;
     
-    String status = (item['status'] ?? "NORMAL").toString();
+    // Calculate dynamic status
+    String status = "NORMAL";
+    if (displayedRemaining <= 0) {
+      status = "SERVICE DUE";
+    } else if (displayedRemaining <= 500) {
+      status = "DUE SOON";
+    }
     
     Color statusColor = Colors.green;
     if (status == "DUE SOON") statusColor = Colors.orange;
-    if (status == "OVERDUE") statusColor = Colors.red;
+    if (status == "SERVICE DUE") statusColor = Colors.red;
+
+    bool isOverdue = displayedRemaining < 0;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -669,7 +687,16 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
               children: [
                 Text(title, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: Color(0xFF1A1A1A))),
                 const SizedBox(height: 4),
-                Text("Remaining: ${remaining.toStringAsFixed(1)} km", style: const TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w600)),
+                Text(
+                  isOverdue 
+                    ? "Overdue by ${(-displayedRemaining).toStringAsFixed(1)} km"
+                    : "Remaining: ${displayedRemaining.toStringAsFixed(1)} km", 
+                  style: TextStyle(
+                    color: isOverdue ? Colors.red : Colors.grey, 
+                    fontSize: 12, 
+                    fontWeight: FontWeight.w600
+                  )
+                ),
               ],
             ),
           ),

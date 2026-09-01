@@ -669,7 +669,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       }
 
       // NEW: Maintenance Deduction
-      await _applyMaintenanceDeduction(truckId, _distance);
+      await _applyMaintenanceDeduction(truckId, sessionToFinalize, _distance);
 
       await _database.ref('truck_locations').child(truckId).update({'status': 'completed', 'current_session': null});
       _positionSubscription?.cancel();
@@ -688,33 +688,49 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
   }
 
-  Future<void> _applyMaintenanceDeduction(String truckId, double tripDistance) async {
+  Future<void> _applyMaintenanceDeduction(String truckId, String sessionId, double tripDistance) async {
     try {
+      // 1. Check if already processed for this session to prevent double deduction
+      final sessionRef = _database.ref('driver_routes/$sessionId');
+      final sessionSnap = await sessionRef.child('maintenanceProcessed').get();
+      if (sessionSnap.exists && sessionSnap.value == true) {
+        debugPrint("[MAINTENANCE] Session $sessionId already processed. Skipping.");
+        return;
+      }
+
       final truckRef = _database.ref('trucks/$truckId/maintenance');
       final snapshot = await truckRef.get();
       
-      Map<String, dynamic> maintenanceData = {
-        'oilChangeRemaining': 5000.0,
-        'tireRotationRemaining': 10000.0,
-        'fullInspectionRemaining': 20000.0,
-      };
-
       if (snapshot.exists && snapshot.value != null) {
-        final data = snapshot.value as Map;
-        maintenanceData['oilChangeRemaining'] = (data['oilChangeRemaining'] ?? 5000.0).toDouble();
-        maintenanceData['tireRotationRemaining'] = (data['tireRotationRemaining'] ?? 10000.0).toDouble();
-        maintenanceData['fullInspectionRemaining'] = (data['fullInspectionRemaining'] ?? 20000.0).toDouble();
+        final Map data = Map.from(snapshot.value as Map);
+        final Map<String, dynamic> updates = {};
+        
+        final keys = ['oilChange', 'tireRotation', 'fullInspection'];
+        for (var key in keys) {
+          if (data.containsKey(key)) {
+            double remaining = (data[key]['remainingKm'] ?? 0.0).toDouble();
+            remaining -= tripDistance;
+            if (remaining < 0) remaining = 0.0;
+            
+            updates['$key/remainingKm'] = remaining;
+            
+            // Recalculate status dynamically
+            String status = "NORMAL";
+            if (remaining <= 0) status = "SERVICE DUE";
+            else if (remaining <= 500) status = "DUE SOON";
+            updates['$key/status'] = status;
+          }
+        }
+        
+        if (updates.isNotEmpty) {
+          updates['lastMaintenanceUpdate'] = ServerValue.timestamp;
+          await truckRef.update(updates);
+        }
       }
 
-      // Deduct trip distance
-      await truckRef.update({
-        'oilChangeRemaining': maintenanceData['oilChangeRemaining'] - tripDistance,
-        'tireRotationRemaining': maintenanceData['tireRotationRemaining'] - tripDistance,
-        'fullInspectionRemaining': maintenanceData['fullInspectionRemaining'] - tripDistance,
-        'lastMaintenanceUpdate': ServerValue.timestamp,
-      });
-
-      debugPrint("[MAINTENANCE] Deducted $tripDistance km from truck $truckId");
+      // 2. Mark session as processed permanently
+      await sessionRef.update({'maintenanceProcessed': true});
+      debugPrint("[MAINTENANCE] Deducted $tripDistance km from truck $truckId and marked session $sessionId as processed.");
     } catch (e) {
       debugPrint("[MAINTENANCE] Error applying deduction: $e");
     }
