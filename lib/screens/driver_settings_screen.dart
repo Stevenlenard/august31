@@ -536,7 +536,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       ], "SAVE CHANGES", () async {
         if (plateCtrl.text.isEmpty) {
           CustomNotification.showTopNotification(context, "Please fill required fields");
-          return;
+          return false;
         }
 
         await ref.update({
@@ -549,6 +549,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
           _loadUser(); // Refresh to update plate number in profile card if needed
           CustomNotification.showTopNotification(context, "Truck details updated successfully.", false);
         }
+        return true;
       });
     } finally {
       if (mounted) setState(() => _isNavigating = false);
@@ -773,11 +774,37 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         final description = descCtrl.text.trim();
         if (description.isEmpty) {
           CustomNotification.showTopNotification(context, "Please complete all required fields.");
-          return;
+          return false;
+        }
+
+        if (_user == null) {
+          CustomNotification.showTopNotification(context, "User session not found. Please log in again.");
+          return false;
         }
 
         try {
-          Position pos = await Geolocator.getCurrentPosition();
+          // Check for location permissions first
+          LocationPermission permission = await Geolocator.checkPermission();
+          if (permission == LocationPermission.denied) {
+            permission = await Geolocator.requestPermission();
+          }
+          
+          // Attempt to get position with a short timeout to prevent hanging
+          Position? pos;
+          if (permission != LocationPermission.deniedForever) {
+            try {
+              pos = await Geolocator.getCurrentPosition(
+                desiredAccuracy: LocationAccuracy.medium,
+                timeLimit: const Duration(seconds: 5),
+              );
+            } catch (e) {
+              debugPrint("GPS Error during report: $e");
+              try {
+                pos = await Geolocator.getLastKnownPosition();
+              } catch (_) {}
+            }
+          }
+
           final truckId = _user?.preferredTruck ?? "GT-001";
           
           final newIssueRef = _database.ref('truck_issues').push();
@@ -790,8 +817,8 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             'issueType': typeCtrl.text,
             'description': description,
             'urgency': urgencyCtrl.text,
-            'latitude': pos.latitude,
-            'longitude': pos.longitude,
+            'latitude': pos?.latitude ?? 0.0,
+            'longitude': pos?.longitude ?? 0.0,
             'createdAt': ServerValue.timestamp,
             'updatedAt': ServerValue.timestamp,
             'status': 'PENDING',
@@ -813,13 +840,15 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
           });
 
           if (mounted) {
-            Navigator.pop(context);
             CustomNotification.showTopNotification(context, "Truck issue reported successfully.", false);
           }
+          return true;
         } catch (e) {
+          debugPrint("Submit Issue Error: $e");
           if (mounted) {
-            CustomNotification.showTopNotification(context, "Submission failed. Please try again.");
+            CustomNotification.showTopNotification(context, "Submission failed. Please check your connection.", true);
           }
+          return false;
         }
       }, loadingText: "Submitting report...");
     } finally {
@@ -1066,11 +1095,11 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
               HoverActionButton(
                 text: confirmText,
                 isDestructive: isDestructive,
-                onTap: () => Navigator.pop(context, true),
+                onTap: () => Navigator.of(context).pop(true),
               ),
               const SizedBox(height: 16),
               _HoverZoomLink(
-                onTap: () => Navigator.pop(context, false),
+                onTap: () => Navigator.of(context).pop(false),
                 child: Text(cancelText, style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w700, fontSize: 15)),
               ),
             ],
@@ -1093,7 +1122,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         _buildTextField("Email Address", _emailController),
         _buildTextField("Complete Address", _addressController),
       ], "SAVE CHANGES", () async {
-        await _handleUpdateProfile(
+        return await _handleUpdateProfile(
           name: _nameController.text.trim(),
           phone: _phoneController.text.trim(),
           email: _emailController.text.trim(),
@@ -1232,7 +1261,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       final res = await _apiService.changePassword(_user!.userId, _user!.role, oldPass, newPass);
       if (res.data['success'] == true) {
         if (mounted) {
-          Navigator.pop(context);
+          Navigator.of(context).pop();
           CustomNotification.showTopNotification(context, "Password changed successfully!", false);
           _oldPasswordController.clear(); _newPasswordController.clear(); _confirmPasswordController.clear();
         }
@@ -1512,9 +1541,10 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
           )
         : null,
       onTap: () async {
+        final nav = Navigator.of(context);
         await AppLocalizations.setLanguage(lang);
         if (mounted) setState(() {});
-        Navigator.pop(context);
+        nav.pop();
       },
     );
   }
@@ -1686,7 +1716,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     );
   }
 
-  Future<void> _handleUpdateProfile({
+  Future<bool> _handleUpdateProfile({
     required String name,
     required String email,
     required String phone,
@@ -1714,14 +1744,16 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         await SessionManager.saveUser(updatedUser.toJson());
         _loadUser();
         if (mounted) {
-          Navigator.pop(context); // Close modal
           CustomNotification.showTopNotification(context, "Profile updated successfully!", false);
         }
+        return true;
       } else {
         CustomNotification.showTopNotification(context, res.data['message'] ?? "Update failed");
+        return false;
       }
     } catch (e) {
       CustomNotification.showTopNotification(context, "Error updating profile: $e");
+      return false;
     } finally {
       if (mounted) setState(() => _isNavigating = false);
     }
@@ -1781,7 +1813,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       final res = await _apiService.changePassword(_user!.userId, _user!.role, oldPass, newPass);
       if (res.data['success'] == true) {
         if (mounted) {
-          Navigator.pop(context);
+          Navigator.of(context).pop();
           CustomNotification.showTopNotification(context, "Password changed successfully!", false);
           _oldPasswordController.clear(); _newPasswordController.clear(); _confirmPasswordController.clear();
         }
@@ -1842,7 +1874,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     );
   }
 
-  void _showModal(String title, List<Widget> body, String? btnText, Future<void> Function()? onBtnTap, {String loadingText = "Saving changes..."}) async {
+  void _showModal(String title, List<Widget> body, String? btnText, Future<bool> Function()? onBtnTap, {String loadingText = "Saving changes..."}) async {
     _showStyledBottomSheet(
       title: title,
       children: [
@@ -1857,6 +1889,9 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
               isLoading: isModalLoading,
               useZoom: true,
               onTap: isModalLoading ? null : () async {
+                // Capture the navigator before any await
+                final navigator = Navigator.of(context);
+                
                 bool confirmed = await _showConfirmActionDialog(
                   title: title.contains("Report") ? "Submit Report?" : "Save Changes?",
                   message: title.contains("Report") 
@@ -1867,8 +1902,22 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
 
                 if (confirmed && onBtnTap != null) {
                   setModalState(() => isModalLoading = true);
-                  await onBtnTap();
-                  if (mounted) setModalState(() => isModalLoading = false);
+                  try {
+                    bool success = await onBtnTap();
+                    if (mounted) {
+                      setModalState(() => isModalLoading = false);
+                      if (success) {
+                        // Small delay to ensure previous dialog transitions are settled
+                        await Future.delayed(const Duration(milliseconds: 200));
+                        if (navigator.canPop()) {
+                          navigator.pop();
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    if (mounted) setModalState(() => isModalLoading = false);
+                    debugPrint("Modal Action Error: $e");
+                  }
                 }
               },
             );
