@@ -100,11 +100,11 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> {
             (context, animation) => _buildOrganizedComplaintItem(removedItem, animation),
             duration: const Duration(milliseconds: 300),
           );
-          _showSnackbar("Successful delete complaint");
+          _showSnackBar("Successful delete complaint");
           setState(() {}); // Refresh counts
         }
       } catch (e) {
-        _showSnackbar("Failed to delete: $e", isError: true);
+        _showSnackBar("Failed to delete: $e", isError: true);
       }
     }
   }
@@ -136,11 +136,11 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> {
             );
             await Future.delayed(const Duration(milliseconds: 100));
           }
-          _showSnackbar("Successful cleared all complaint");
+          _showSnackBar("Successful cleared all complaint");
           setState(() {}); // Refresh UI
         }
       } catch (e) {
-        _showSnackbar("Bulk delete failed: $e", isError: true);
+        _showSnackBar("Bulk delete failed: $e", isError: true);
       }
     }
   }
@@ -177,7 +177,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> {
     ) ?? false;
   }
 
-  void _showSnackbar(String message, {bool isError = false}) {
+  void _showSnackBar(String message, {bool isError = false}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -382,7 +382,7 @@ class _ResidentComplaintsScreenState extends State<ResidentComplaintsScreen> {
              _complaints.removeAt(index);
              await _apiService.deleteComplaint(id);
              await _deleteFromFirebase(id);
-             _showSnackbar("Successful delete complaint");
+             _showSnackBar("Successful delete complaint");
              setState(() {});
            } catch (_) {}
         },
@@ -580,7 +580,7 @@ class AddComplaintModalState extends State<AddComplaintModal> {
   void _submit() async {
     final desc = _descriptionController.text.trim();
     if (desc.isEmpty) {
-      _showSnackbar("Please provide issue details", isError: true);
+      _showSnackBar("Please provide issue details", isError: true);
       return;
     }
 
@@ -607,16 +607,16 @@ class AddComplaintModalState extends State<AddComplaintModal> {
         if (!mounted) return;
         Navigator.pop(context);
         widget.onSuccess();
-        _showSnackbar("Complaint submitted successfully");
+        _showSnackBar("Complaint submitted successfully");
       }
     } catch (e) {
-      if (mounted) _showSnackbar("Error: $e", isError: true);
+      if (mounted) _showSnackBar("Error: $e", isError: true);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void _showSnackbar(String message, {bool isError = false}) {
+  void _showSnackBar(String message, {bool isError = false}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

@@ -579,19 +579,28 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             'intervalKm': 5000.0,
             'remainingKm': 5000.0,
             'lastServiceAt': null,
-            'status': "NORMAL"
+            'status': "NORMAL",
+            'notified500': false,
+            'notified100': false,
+            'notifiedDue': false,
           },
           'tireRotation': {
             'intervalKm': 10000.0,
             'remainingKm': 10000.0,
             'lastServiceAt': null,
-            'status': "NORMAL"
+            'status': "NORMAL",
+            'notified500': false,
+            'notified100': false,
+            'notifiedDue': false,
           },
           'fullInspection': {
             'intervalKm': 20000.0,
             'remainingKm': 20000.0,
             'lastServiceAt': null,
-            'status': "NORMAL"
+            'status': "NORMAL",
+            'notified500': false,
+            'notified100': false,
+            'notifiedDue': false,
           }
         }
       });
@@ -613,12 +622,18 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         children: [
           const Text("Upcoming truck service dates", style: TextStyle(color: Colors.grey, fontSize: 13)),
           const SizedBox(height: 20),
+          // Listen to Truck Location for LIVE distance subtraction
           StreamBuilder(
             stream: _database.ref('truck_locations/$truckId').onValue,
             builder: (context, locSnapshot) {
-              final double activeTripDistance = (locSnapshot.hasData && locSnapshot.data!.snapshot.exists) 
-                ? (locSnapshot.data!.snapshot.value as Map)['distance']?.toDouble() ?? 0.0 
-                : 0.0;
+              double currentTripDist = 0.0;
+              if (locSnapshot.hasData && locSnapshot.data!.snapshot.value != null) {
+                final loc = locSnapshot.data!.snapshot.value as Map;
+                // Only if it's an active session, we show live preview
+                if (loc['current_session'] != null) {
+                  currentTripDist = (loc['distance'] ?? 0.0).toDouble();
+                }
+              }
 
               return StreamBuilder(
                 stream: _database.ref('trucks/$truckId/maintenance').onValue,
@@ -632,11 +647,11 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
                   
                   return Column(
                     children: [
-                      _buildMaintenanceItem("Oil Change", data['oilChange'], "oilChange", truckId, activeTripDistance),
+                      _buildMaintenanceItem("Oil Change", data['oilChange'], "oilChange", truckId, currentTripDist: currentTripDist),
                       const SizedBox(height: 12),
-                      _buildMaintenanceItem("Tire Rotation", data['tireRotation'], "tireRotation", truckId, activeTripDistance),
+                      _buildMaintenanceItem("Tire Rotation", data['tireRotation'], "tireRotation", truckId, currentTripDist: currentTripDist),
                       const SizedBox(height: 12),
-                      _buildMaintenanceItem("Full Inspection", data['fullInspection'], "fullInspection", truckId, activeTripDistance),
+                      _buildMaintenanceItem("Full Inspection", data['fullInspection'], "fullInspection", truckId, currentTripDist: currentTripDist),
                     ],
                   );
                 },
@@ -650,26 +665,32 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     }
   }
 
-  Widget _buildMaintenanceItem(String title, dynamic item, String key, String truckId, double activeTripDistance) {
+  Widget _buildMaintenanceItem(String title, dynamic item, String key, String truckId, {double currentTripDist = 0.0}) {
     if (item == null) return const SizedBox.shrink();
     
-    // Live calculation: savedRemaining - currentActiveTrip
+    // LIVE DEDUCTION PREVIEW
     double savedRemaining = (item['remainingKm'] ?? 0.0).toDouble();
-    double displayedRemaining = savedRemaining - activeTripDistance;
+    double remaining = savedRemaining - currentTripDist;
+    if (remaining < -9999) remaining = -9999; // Cap extreme values
     
-    // Calculate dynamic status
+    // DYNAMIC STATUS LOGIC
     String status = "NORMAL";
-    if (displayedRemaining <= 0) {
-      status = "SERVICE DUE";
-    } else if (displayedRemaining <= 500) {
-      status = "DUE SOON";
-    }
-    
     Color statusColor = Colors.green;
-    if (status == "DUE SOON") statusColor = Colors.orange;
-    if (status == "SERVICE DUE") statusColor = Colors.red;
 
-    bool isOverdue = displayedRemaining < 0;
+    if (remaining <= 0) {
+      status = "SERVICE DUE";
+      statusColor = Colors.red;
+    } else if (remaining <= 100) {
+      status = "URGENT";
+      statusColor = Colors.redAccent;
+    } else if (remaining <= 500) {
+      status = "DUE SOON";
+      statusColor = Colors.orange;
+    }
+
+    String subText = remaining <= 0 
+        ? "Overdue by ${(remaining.abs()).toStringAsFixed(1)} km" 
+        : "Remaining: ${remaining.toStringAsFixed(1)} km";
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -687,16 +708,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
               children: [
                 Text(title, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: Color(0xFF1A1A1A))),
                 const SizedBox(height: 4),
-                Text(
-                  isOverdue 
-                    ? "Overdue by ${(-displayedRemaining).toStringAsFixed(1)} km"
-                    : "Remaining: ${displayedRemaining.toStringAsFixed(1)} km", 
-                  style: TextStyle(
-                    color: isOverdue ? Colors.red : Colors.grey, 
-                    fontSize: 12, 
-                    fontWeight: FontWeight.w600
-                  )
-                ),
+                Text(subText, style: const TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w600)),
               ],
             ),
           ),
@@ -710,11 +722,11 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
               ),
               const SizedBox(height: 8),
               _HoverZoomLink(
-                onTap: status == "NORMAL" ? null : () => _handleMarkMaintenanceDone(truckId, key, item['intervalKm'] ?? 5000.0),
+                onTap: (remaining > 500) ? null : () => _handleMarkMaintenanceDone(truckId, key, item['intervalKm'] ?? 5000.0),
                 child: Text(
                   "MARK DONE",
                   style: TextStyle(
-                    color: status == "NORMAL" ? Colors.grey.shade300 : AppColors.tealText,
+                    color: (remaining > 500) ? Colors.grey.shade300 : AppColors.tealText,
                     fontWeight: FontWeight.w900,
                     fontSize: 11,
                     letterSpacing: 0.5
@@ -734,6 +746,9 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         'status': 'NORMAL',
         'remainingKm': interval,
         'lastServiceAt': ServerValue.timestamp,
+        'notified500': false,
+        'notified100': false,
+        'notifiedDue': false,
       });
       if (mounted) CustomNotification.showTopNotification(context, "Maintenance task completed!", false);
     } catch (e) {
@@ -1705,6 +1720,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
                       return;
                     }
 
+                    final navigator = Navigator.of(context);
                     bool confirm = await _showConfirmActionDialog(
                       title: "Save Changes?",
                       message: "Are you sure you want to update your profile information?",
@@ -1713,7 +1729,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
                     );
 
                     if (confirm) {
-                      final navigator = Navigator.of(context);
                       bool success = await _handleUpdateProfile(
                         name: nameCtrl.text.trim(),
                         email: emailCtrl.text.trim(),
@@ -2070,9 +2085,11 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       isDestructive: false
     );
     if (confirmed) {
+      if (!mounted) return;
+      final navigator = Navigator.of(context);
       await SessionManager.logout();
       if (mounted) {
-        Navigator.pushReplacementNamed(context, '/');
+        navigator.pushReplacementNamed('/');
       }
     }
   }

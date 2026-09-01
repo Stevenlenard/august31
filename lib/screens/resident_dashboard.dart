@@ -1104,7 +1104,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
         }
         await Future.delayed(const Duration(milliseconds: 50));
       }
-      _showSnackbar("Successful cleared all notifications");
+      _showSnackBar("Successful cleared all notifications");
       if (mounted) setModalState(() {});
     }
   }
@@ -1126,7 +1126,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
         onDismissed: (direction) {
           final String key = item['key'].toString();
           _database.ref('notifications/$key').remove(); // Permanent delete
-          _showSnackbar("Successful delete notification");
+          _showSnackBar("Successful delete notification");
         },
         background: Container(
           margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
@@ -1234,7 +1234,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
     );
   }
 
-  void _showSnackbar(String message, {bool isError = false}) {
+  void _showSnackBar(String message, {bool isError = false}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

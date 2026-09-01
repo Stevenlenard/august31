@@ -3,12 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:intl/intl.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:permission_handler/permission_handler.dart';
 import '../utils/session_manager.dart';
 import '../models/user.dart';
 import '../utils/app_theme.dart';
-import '../utils/system_logger.dart';
-import '../utils/responsive.dart';
 import 'driver_settings_screen.dart';
 import 'driver_track_truck_screen.dart';
 
@@ -40,6 +37,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   bool _isDebugPanelExpanded = false; // Collapsible Debug Panel
   String _currentTime = "";
   Timer? _clockTimer;
+  Map<String, dynamic> _maintenanceData = {};
 
   // Header Animation
   late AnimationController _circleController;
@@ -71,7 +69,6 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   String? _sessionId;
   DateTime? _lastGpsUpdateTime;
   Timer? _idleDetectionTimer;
-  bool _isInitializing = true;
   StreamSubscription? _statusSubscription;
   StreamSubscription? _purokStatusSubscription;
   StreamSubscription? _notificationSubscription;
@@ -129,6 +126,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       
       final truckId = _user?.preferredTruck ?? "GT-001";
       
+      _loadMaintenanceData(truckId);
+
       // Force Online/Active status immediately upon loading dashboard
       await _database.ref('truck_locations').child(truckId).update({
         'isOnline': true,
@@ -155,6 +154,20 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
   }
 
+  void _loadMaintenanceData(String truckId) async {
+    final ref = _database.ref('trucks/$truckId/maintenance');
+    // We listen to it live so we have the latest flags and values
+    ref.onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        if (mounted) {
+          setState(() {
+            _maintenanceData = Map<String, dynamic>.from(event.snapshot.value as Map);
+          });
+        }
+      }
+    });
+  }
+
   void _setupListeners() {
     final truckId = _user?.preferredTruck ?? "GT-001";
     _statusSubscription?.cancel();
@@ -165,7 +178,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           setState(() {
             _status = data['status']?.toString().toUpperCase() ?? "OFFLINE";
             _distance = (data['distance'] ?? 0.0).toDouble();
-            if (data['start_time'] != null) _startTime = data['start_time'];
+            if (data['start_time'] != null) {
+              _startTime = data['start_time'];
+            }
           });
         }
       }
@@ -196,12 +211,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
             if (val['isRead'] == false) {
               unread++;
               
-              // NEW: Trigger real-time snackbar if it's a NEW notification while dashboard is open
+              // NEW: Trigger real-time SnackBar if it's a NEW notification while dashboard is open
               final int ts = (val['timestamp'] ?? 0) as int;
               if (ts > dashboardLoadTime && val['realtimeTriggered'] != true) {
                 // Mark locally as triggered to avoid duplicates in the same session
                 val['realtimeTriggered'] = true; 
-                _showSnackbar("${val['title']}: ${val['message']}");
+                _showSnackBar("${val['title']}: ${val['message']}");
               }
             }
           } else {
@@ -228,7 +243,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         debugPrint("FINAL DRIVER ALERT COUNT: $matched (Unread: $unread)");
         debugPrint("---------------------------------");
 
-        if (mounted) setState(() => _unreadNotifications = unread);
+        if (mounted) {
+          setState(() => _unreadNotifications = unread);
+        }
       }
     });
 
@@ -243,9 +260,13 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
            'status': (_status.contains("LOST") || _status == "OFFLINE") ? "ACTIVE" : _status,
            'updatedAt': DateTime.now().toIso8601String(),
         });
-        if (mounted) setState(() {
-           if (_status.contains("LOST") || _status == "OFFLINE") _status = "ACTIVE";
-        });
+        if (mounted) {
+          setState(() {
+            if (_status.contains("LOST") || _status == "OFFLINE") {
+              _status = "ACTIVE";
+            }
+          });
+        }
       } else if (!isConnected && _status != "OFFLINE") {
         debugPrint("[CONNECTION] Lost. Setting local status to IDLE.");
         if (mounted) setState(() => _status = "IDLE (LOST)");
@@ -254,7 +275,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   void _setupRoutePointsListener() {
-    if (_sessionId == null) return;
+    if (_sessionId == null) {
+      return;
+    }
     _routePointsSubscription?.cancel();
     _routePointsSubscription = _database.ref('driver_routes/$_sessionId/route').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
@@ -268,7 +291,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   void _setupPurokListener() {
-    if (_sessionId == null) return;
+    if (_sessionId == null) {
+      return;
+    }
     _purokStatusSubscription?.cancel();
     _purokStatusSubscription = _database.ref('collection_progress').child(_sessionId!).onValue.listen((event) {
       if (event.snapshot.exists) {
@@ -295,13 +320,10 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   // --- TRIP LOGIC ---
 
   Future<void> _startTripSession() async {
-    setState(() => _isInitializing = true);
-    
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) {
-        setState(() => _isInitializing = false);
         return;
       }
     }
@@ -378,7 +400,6 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           _startTime = timeStr;
           _distance = 0.0;
           _currentPosition = startPos;
-          _isInitializing = false;
           _lastGpsUpdateTime = DateTime.now();
           _completedCount = 0; // Reset count locally
           _purokStatus = {}; // Clear previous trip progress
@@ -391,7 +412,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       _startTracking();
       _startIdleDetection();
     } catch (e) {
-      if (mounted) setState(() => _isInitializing = false);
+      // Error handling
     }
   }
 
@@ -418,7 +439,6 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final truckId = _user?.preferredTruck ?? "GT-001";
     
     double traveled = 0;
-    // bool movedSignificantly = false; // Removed unused variable
 
     if (_currentPosition != null) {
       // Calculate real distance walked/traveled between consecutive points
@@ -456,6 +476,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           _distance += traveled;
           _currentPosition = pos;
           debugPrint("[GPS MASTER] ACCEPTED: ${pos.latitude}, ${pos.longitude}");
+          _checkMaintenanceThresholds();
         } else {
           debugPrint("[GPS MASTER] FILTERED (Stationary): moved ${traveled * 1000}m");
         }
@@ -474,7 +495,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     double avgSpeed = 0.0;
     if (_startDateTime != null) {
       final durationHrs = DateTime.now().difference(_startDateTime!).inSeconds / 3600.0;
-      if (durationHrs > 0) avgSpeed = _distance / durationHrs;
+      if (durationHrs > 0) {
+        avgSpeed = _distance / durationHrs;
+      }
     }
 
     // Determine Status for this specific point (respecting override)
@@ -521,7 +544,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   void _checkPurokProximity(Position pos) {
-    if (_sessionId == null) return;
+    if (_sessionId == null) {
+      return;
+    }
     
     // STRICTER GPS PROXIMITY: Only trigger if accuracy is good
     if (pos.accuracy > 50 && !_isSimulationMode) {
@@ -540,7 +565,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       }
       
       // Already completed in this session? Skip completion logic.
-      if (_purokStatus[key]?['completed'] == true) continue;
+      if (_purokStatus[key]?['completed'] == true) {
+        continue;
+      }
       
       // Logic: Must be within 50 meters AND moving slowly (or simulation)
       bool speedValid = _isSimulationMode || (pos.speed * 3.6) < 15.0; 
@@ -568,7 +595,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   final Set<String> _autoNotifiedPuroks = {};
 
   void _handleAutoNotifications(String areaName, double distance) async {
-    if (_autoNotifiedPuroks.contains(areaName)) return;
+    if (_autoNotifiedPuroks.contains(areaName)) {
+      return;
+    }
     
     final truckId = _user?.preferredTruck ?? "GT-001";
     
@@ -590,14 +619,18 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   final Set<String> _approachNotifiedPuroks = {};
 
   void _handleApproachNotification(String areaName, double distance) async {
-    if (_approachNotifiedPuroks.contains(areaName)) return;
+    if (_approachNotifiedPuroks.contains(areaName)) {
+      return;
+    }
     
     final truckId = _user?.preferredTruck ?? "GT-001";
     
     // Calculate simple ETA (Assume 15 km/h for arrival)
     double speedMps = 15 / 3.6; 
     int etaMinutes = (distance / speedMps / 60).ceil();
-    if (etaMinutes < 1) etaMinutes = 1;
+    if (etaMinutes < 1) {
+      etaMinutes = 1;
+    }
 
     await _database.ref('notifications').push().set({
       'type': 'auto_approach',
@@ -614,7 +647,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   void _appendRoutePoint(Position pos, String status, String color) {
-    if (_sessionId == null) return;
+    if (_sessionId == null) {
+      return;
+    }
     // Use local timestamp for immediate consistent sorting in map views
     final int ts = DateTime.now().millisecondsSinceEpoch;
     _database.ref('driver_routes').child(_sessionId!).child('route').push().set({
@@ -627,7 +662,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   void _startIdleDetection() {
     _idleDetectionTimer?.cancel();
     _idleDetectionTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
-      if (_currentPosition == null || _status == "OFFLINE" || _status == "FINISHED" || _status == "IDLE") return;
+      if (_currentPosition == null || _status == "OFFLINE" || _status == "FINISHED" || _status == "IDLE") {
+        return;
+      }
       if (_lastGpsUpdateTime != null && DateTime.now().difference(_lastGpsUpdateTime!).inMinutes >= 2) {
         _updateTripStatus("IDLE");
       }
@@ -668,8 +705,19 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         _appendRoutePoint(_currentPosition!, "FINISHED", "BLACK");
       }
 
-      // NEW: Maintenance Deduction
-      await _applyMaintenanceDeduction(truckId, sessionToFinalize, _distance);
+      // NEW: Maintenance Deduction (only once per session)
+      final sessionRef = _database.ref('driver_routes').child(sessionToFinalize);
+      final sessionSnap = await sessionRef.get();
+      bool alreadyDeducted = false;
+      if (sessionSnap.exists) {
+        final sData = sessionSnap.value as Map;
+        alreadyDeducted = sData['maintenance_applied'] == true;
+      }
+
+      if (!alreadyDeducted) {
+        await _applyMaintenanceDeduction(truckId, _distance);
+        await sessionRef.update({'maintenance_applied': true});
+      }
 
       await _database.ref('truck_locations').child(truckId).update({'status': 'completed', 'current_session': null});
       _positionSubscription?.cancel();
@@ -688,49 +736,91 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
   }
 
-  Future<void> _applyMaintenanceDeduction(String truckId, String sessionId, double tripDistance) async {
-    try {
-      // 1. Check if already processed for this session to prevent double deduction
-      final sessionRef = _database.ref('driver_routes/$sessionId');
-      final sessionSnap = await sessionRef.child('maintenanceProcessed').get();
-      if (sessionSnap.exists && sessionSnap.value == true) {
-        debugPrint("[MAINTENANCE] Session $sessionId already processed. Skipping.");
-        return;
-      }
+  void _checkMaintenanceThresholds() async {
+    if (_maintenanceData.isEmpty || _user == null) return;
+    final truckId = _user?.preferredTruck ?? "GT-001";
 
+    final categories = ['oilChange', 'tireRotation', 'fullInspection'];
+    final labels = {
+      'oilChange': 'Oil Change',
+      'tireRotation': 'Tire Rotation',
+      'fullInspection': 'Full Inspection'
+    };
+
+    for (var cat in categories) {
+      if (!_maintenanceData.containsKey(cat)) continue;
+      final data = _maintenanceData[cat] as Map;
+      double savedRemaining = (data['remainingKm'] ?? 0.0).toDouble();
+      double currentRemaining = savedRemaining - _distance;
+
+      // Thresholds
+      if (currentRemaining <= 0 && data['notifiedDue'] != true) {
+        await _sendMaintenanceNotification(truckId, cat, "${labels[cat]} Required", "$truckId has reached its ${(labels[cat] ?? '').toLowerCase()} limit. Maintenance is required.", "notifiedDue");
+      } else if (currentRemaining <= 100 && data['notified100'] != true) {
+        await _sendMaintenanceNotification(truckId, cat, "${labels[cat]} Urgent", "$truckId only has ${currentRemaining.toStringAsFixed(0)} km remaining before its ${(labels[cat] ?? '').toLowerCase()} is due.", "notified100");
+      } else if (currentRemaining <= 500 && data['notified500'] != true) {
+        await _sendMaintenanceNotification(truckId, cat, "${labels[cat]} Due Soon", "$truckId has ${currentRemaining.toStringAsFixed(0)} km remaining before the next ${(labels[cat] ?? '').toLowerCase()}.", "notified500");
+      }
+    }
+  }
+
+  Future<void> _sendMaintenanceNotification(String truckId, String category, String title, String message, String flagField) async {
+    // 1. Mark as notified in Firebase immediately to prevent duplicate triggers
+    await _database.ref('trucks/$truckId/maintenance/$category').update({flagField: true});
+    
+    // 2. Push notification to the global notifications node
+    await _database.ref('notifications').push().set({
+      'type': 'MAINTENANCE_ALERT',
+      'title': title,
+      'message': message,
+      'truck_id': truckId,
+      'driver_id': _user?.userId.toString(),
+      'targetRole': 'driver',
+      'timestamp': ServerValue.timestamp,
+      'isRead': false,
+    });
+    
+    debugPrint("[MAINTENANCE ALERT] $title: $message");
+  }
+
+  Future<void> _applyMaintenanceDeduction(String truckId, double tripDistance) async {
+    try {
       final truckRef = _database.ref('trucks/$truckId/maintenance');
       final snapshot = await truckRef.get();
       
-      if (snapshot.exists && snapshot.value != null) {
-        final Map data = Map.from(snapshot.value as Map);
-        final Map<String, dynamic> updates = {};
+      if (!snapshot.exists || snapshot.value == null) {
+        return;
+      }
+      final data = snapshot.value as Map;
+
+      // Deduct from each maintenance category
+      Future<void> deductItem(String key, double interval) async {
+        final item = data[key] as Map?;
+        double currentRemaining = (item?['remainingKm'] ?? interval).toDouble();
+        double newRemaining = currentRemaining - tripDistance;
         
-        final keys = ['oilChange', 'tireRotation', 'fullInspection'];
-        for (var key in keys) {
-          if (data.containsKey(key)) {
-            double remaining = (data[key]['remainingKm'] ?? 0.0).toDouble();
-            remaining -= tripDistance;
-            if (remaining < 0) remaining = 0.0;
-            
-            updates['$key/remainingKm'] = remaining;
-            
-            // Recalculate status dynamically
-            String status = "NORMAL";
-            if (remaining <= 0) status = "SERVICE DUE";
-            else if (remaining <= 500) status = "DUE SOON";
-            updates['$key/status'] = status;
-          }
+        // Dynamic status based on new value
+        String status = "NORMAL";
+        if (newRemaining <= 0) {
+          status = "SERVICE DUE";
+        } else if (newRemaining <= 100) {
+          status = "URGENT";
+        } else if (newRemaining <= 500) {
+          status = "DUE SOON";
         }
-        
-        if (updates.isNotEmpty) {
-          updates['lastMaintenanceUpdate'] = ServerValue.timestamp;
-          await truckRef.update(updates);
-        }
+
+        await truckRef.child(key).update({
+          'remainingKm': newRemaining,
+          'status': status,
+          'lastMaintenanceUpdate': ServerValue.timestamp,
+        });
       }
 
-      // 2. Mark session as processed permanently
-      await sessionRef.update({'maintenanceProcessed': true});
-      debugPrint("[MAINTENANCE] Deducted $tripDistance km from truck $truckId and marked session $sessionId as processed.");
+      await deductItem('oilChange', 5000.0);
+      await deductItem('tireRotation', 10000.0);
+      await deductItem('fullInspection', 20000.0);
+
+      debugPrint("[MAINTENANCE] Final Deduction: $tripDistance km from truck $truckId");
     } catch (e) {
       debugPrint("[MAINTENANCE] Error applying deduction: $e");
     }
@@ -790,7 +880,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   void _sendManualAlert(String area) async {
-    if (_sessionId == null) return;
+    if (_sessionId == null) {
+      return;
+    }
     final truckId = _user?.preferredTruck ?? "GT-001";
     
     try {
@@ -814,9 +906,13 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         'completionSource': 'MANUAL_ALERT',
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Alert sent and $area marked as visited.")));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Alert sent and $area marked as visited.")));
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Failed to send alert: $e")));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Failed to send alert: $e")));
+      }
     }
   }
 
@@ -825,7 +921,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final truckId = _user?.preferredTruck ?? "GT-001";
     await _database.ref('truck_locations').child(truckId).update({'status': 'OFFLINE', 'isOnline': false, 'lastSeen': ServerValue.timestamp});
     await SessionManager.logout();
-    if (mounted) Navigator.pushReplacementNamed(context, '/');
+    if (mounted) {
+      Navigator.pushReplacementNamed(context, '/');
+    }
   }
 
   @override
@@ -873,8 +971,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-          _buildDiagRow("GPS", "${_currentPosition?.latitude.toStringAsFixed(5)}, ${_currentPosition?.longitude.toStringAsFixed(5)}"),
-          _buildDiagRow("LAST", "${_tripRoutePoints.isNotEmpty ? _tripRoutePoints.last['lat'].toStringAsFixed(5) : '...'}, ${_tripRoutePoints.isNotEmpty ? _tripRoutePoints.last['lng'].toStringAsFixed(5) : '...'}"),
+          _buildDiagnosticRow("GPS", "${_currentPosition?.latitude.toStringAsFixed(5)}, ${_currentPosition?.longitude.toStringAsFixed(5)}"),
+          _buildDiagnosticRow("LAST", "${(_tripRoutePoints.isNotEmpty && _tripRoutePoints.last['lat'] != null) ? _tripRoutePoints.last['lat'].toStringAsFixed(5) : '...'}, ${(_tripRoutePoints.isNotEmpty && _tripRoutePoints.last['lng'] != null) ? _tripRoutePoints.last['lng'].toStringAsFixed(5) : '...'}"),
         ],
       ),
     ),
@@ -961,7 +1059,7 @@ Positioned(
     );
   }
 
-  Widget _buildDiagRow(String label, String value, {Color color = Colors.white70}) {
+  Widget _buildDiagnosticRow(String label, String value, {Color color = Colors.white70}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
@@ -1118,7 +1216,7 @@ Positioned(
         if (badgeCount != null)
           Positioned(
             right: -2, top: -2,
-            child: Container(padding: const EdgeInsets.all(5), decoration: const BoxDecoration(color: Color(0xFFFF4081), shape: BoxShape.circle), child: Text("${badgeCount}", style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w900))),
+            child: Container(padding: const EdgeInsets.all(5), decoration: const BoxDecoration(color: Color(0xFFFF4081), shape: BoxShape.circle), child: Text("$badgeCount", style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w900))),
           ),
       ]),
     );
@@ -1616,7 +1714,7 @@ Positioned(
     }
   }
 
-  void _showSnackbar(String message, {bool isError = false}) {
+  void _showSnackBar(String message, {bool isError = false}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1736,14 +1834,18 @@ Positioned(
 
                         newList.sort((a, b) => (b['timestamp'] ?? 0).compareTo(a['timestamp'] ?? 0));
                         notifications = newList;
-                        if (notifications.isEmpty) return _buildEmptyState();
+                        if (notifications.isEmpty) {
+                          return _buildEmptyState();
+                        }
 
                         return AnimatedList(
                           key: listKey,
                           shrinkWrap: true,
                           initialItemCount: notifications.length,
                           itemBuilder: (context, index, animation) {
-                            if (index >= notifications.length) return const SizedBox();
+                            if (index >= notifications.length) {
+                              return const SizedBox();
+                            }
                             return _buildDismissibleNotification(notifications[index], index, listKey, setModalState);
                           },
                         );
@@ -1766,17 +1868,19 @@ Positioned(
   }
 
   Widget _buildEmptyState() {
-    return Column(children: [
-      const SizedBox(height: 48),
-      const CircleAvatar(radius: 40, backgroundColor: Color(0xFFF5F5F5), child: Icon(Icons.notifications_rounded, size: 40, color: Colors.grey)),
-      const SizedBox(height: 16),
-      const Text("No alerts found.", style: TextStyle(fontWeight: FontWeight.w900, color: Colors.grey)),
-      const SizedBox(height: 48),
+    return const Column(children: [
+      SizedBox(height: 48),
+      CircleAvatar(radius: 40, backgroundColor: Color(0xFFF5F5F5), child: Icon(Icons.notifications_rounded, size: 40, color: Colors.grey)),
+      SizedBox(height: 16),
+      Text("No alerts found.", style: TextStyle(fontWeight: FontWeight.w900, color: Colors.grey)),
+      SizedBox(height: 48),
     ]);
   }
 
   Future<void> _handleClearAllNotifications(List<Map> notifications, GlobalKey<AnimatedListState> listKey, StateSetter setModalState) async {
-    if (notifications.isEmpty) return;
+    if (notifications.isEmpty) {
+      return;
+    }
     bool confirmed = await _showConfirmDialog(
       title: "Clear All?",
       message: "Are you sure you want to permanently remove all alerts?",
@@ -1794,7 +1898,7 @@ Positioned(
         }
         await Future.delayed(const Duration(milliseconds: 50));
       }
-      _showSnackbar("Alerts cleared");
+      _showSnackBar("Alerts cleared");
       if (mounted) setModalState(() {});
     }
   }
@@ -1815,7 +1919,7 @@ Positioned(
         },
         onDismissed: (direction) {
           _database.ref('notifications/${item['key']}').remove();
-          _showSnackbar("Alert deleted");
+          _showSnackBar("Alert deleted");
         },
         background: Container(
           decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(24)),
