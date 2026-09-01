@@ -780,7 +780,10 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
           Position pos = await Geolocator.getCurrentPosition();
           final truckId = _user?.preferredTruck ?? "GT-001";
           
-          await _database.ref('truck_issues').push().set({
+          final newIssueRef = _database.ref('truck_issues').push();
+          final String issueId = newIssueRef.key ?? '';
+          
+          await newIssueRef.set({
             'driverId': _user?.userId,
             'driverName': _user?.name,
             'truckId': truckId,
@@ -794,6 +797,19 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             'status': 'PENDING',
             'isReadByDriver': false,
             'isReadByAdmin': false,
+          });
+
+          // TRIGGER NOTIFICATION FOR ADMIN
+          await _database.ref('notifications').push().set({
+            'type': 'DRIVER_ISSUE',
+            'title': 'New Truck Issue Reported',
+            'message': '${_user?.name} reported a ${typeCtrl.text} issue for $truckId',
+            'truck_id': truckId,
+            'driver_id': _user?.userId.toString(),
+            'relatedId': issueId,
+            'targetRole': 'admin',
+            'timestamp': ServerValue.timestamp,
+            'isRead': false,
           });
 
           if (mounted) {
@@ -1419,7 +1435,22 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             }
             final Map data = snapshot.data!.snapshot.value as Map;
             final List alerts = [];
-            data.forEach((k, v) { if (v['truck_id'] == _user?.preferredTruck) alerts.add(v); });
+            data.forEach((k, v) { 
+              final val = v as Map;
+              final String type = (val['type'] ?? '').toString();
+              final String? truckId = val['truck_id']?.toString() ?? val['truckId']?.toString();
+              
+              // Basic filter matching DriverDashboard logic
+              bool isRelevant = false;
+              if (truckId != null && truckId.isNotEmpty && truckId == _user?.preferredTruck) {
+                if (!['auto_arrival', 'auto_approach', 'manual_alert', 'COLLECTION_ALERT', 'COMPLAINT_RESOLVED'].contains(type)) {
+                  isRelevant = true;
+                }
+              }
+              if (val['targetUserId']?.toString() == _user?.userId.toString()) isRelevant = true;
+
+              if (isRelevant) alerts.add(v); 
+            });
             
             if (alerts.isEmpty) {
               return const Center(child: Padding(padding: EdgeInsets.symmetric(vertical: 40), child: Text("No alerts history found.", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))));

@@ -317,6 +317,8 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> with SingleTickerPr
           'title': 'Truck Issue ${newStatus.replaceAll('_', ' ')}',
           'message': 'Your report regarding ${item['issueType']} has been updated to ${newStatus.replaceAll('_', ' ')}.',
           'truck_id': item['truckId'],
+          'targetUserId': item['driverId']?.toString(), // ADDED targeting current driver
+          'targetRole': 'driver',
           'relatedId': item['id'],
           'timestamp': ServerValue.timestamp,
           'isRead': false,
