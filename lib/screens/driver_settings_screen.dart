@@ -161,10 +161,15 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
 
       if (mounted) {
         setState(() {
-          if (key == 'dutyAlerts') _dutyAlerts = value;
-          else if (key == 'collectionNotifications') _collectionNotifications = value;
-          else if (key == 'maintenanceNotifications') _maintenanceNotifications = value;
-          else if (key == 'emergencyAlerts') _emergencyAlerts = value;
+          if (key == 'dutyAlerts') {
+            _dutyAlerts = value;
+          } else if (key == 'collectionNotifications') {
+            _collectionNotifications = value;
+          } else if (key == 'maintenanceNotifications') {
+            _maintenanceNotifications = value;
+          } else if (key == 'emergencyAlerts') {
+            _emergencyAlerts = value;
+          }
         });
         CustomNotification.showTopNotification(context, "$label ${value ? 'enabled' : 'disabled'} successfully.", false);
       }
@@ -535,7 +540,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         _buildTextField("Plate Number", plateCtrl),
       ], "SAVE CHANGES", () async {
         if (plateCtrl.text.isEmpty) {
-          CustomNotification.showTopNotification(context, "Please fill required fields");
           return false;
         }
 
@@ -547,7 +551,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         
         if (mounted) {
           _loadUser(); // Refresh to update plate number in profile card if needed
-          CustomNotification.showTopNotification(context, "Truck details updated successfully.", false);
         }
         return true;
       });
@@ -711,14 +714,19 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     }
   }
 
-  void _showReportIssue() {
+  void _showReportIssue() async {
     if (_isNavigating) return;
     setState(() => _isNavigating = true);
 
     try {
+      // Pre-check permissions before opening the modal
+      await Geolocator.checkPermission();
+      
       final descCtrl = TextEditingController();
       final typeCtrl = TextEditingController(text: "Engine");
       final urgencyCtrl = TextEditingController(text: "Medium");
+
+      if (!mounted) return;
 
       _showModal("Report Truck Issue", [
         const Text("Describe any mechanical or technical problems", style: TextStyle(color: Colors.grey, fontSize: 13)),
@@ -773,7 +781,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       ], "Submit Report", () async {
         final description = descCtrl.text.trim();
         if (description.isEmpty) {
-          CustomNotification.showTopNotification(context, "Please complete all required fields.");
           return false;
         }
 
@@ -783,30 +790,18 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         }
 
         try {
-          // Check for location permissions first
-          LocationPermission permission = await Geolocator.checkPermission();
-          if (permission == LocationPermission.denied) {
-            permission = await Geolocator.requestPermission();
-          }
-          
           // Attempt to get position with a short timeout to prevent hanging
           Position? pos;
-          if (permission != LocationPermission.deniedForever) {
-            try {
-              pos = await Geolocator.getCurrentPosition(
-                desiredAccuracy: LocationAccuracy.medium,
-                timeLimit: const Duration(seconds: 5),
-              );
-            } catch (e) {
-              debugPrint("GPS Error during report: $e");
-              try {
-                pos = await Geolocator.getLastKnownPosition();
-              } catch (_) {}
-            }
+          try {
+            pos = await Geolocator.getCurrentPosition(
+              desiredAccuracy: LocationAccuracy.low,
+              timeLimit: const Duration(seconds: 3),
+            );
+          } catch (e) {
+            debugPrint("GPS Timeout during report: $e");
           }
 
           final truckId = _user?.preferredTruck ?? "GT-001";
-          
           final newIssueRef = _database.ref('truck_issues').push();
           final String issueId = newIssueRef.key ?? '';
           
@@ -839,15 +834,9 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             'isRead': false,
           });
 
-          if (mounted) {
-            CustomNotification.showTopNotification(context, "Truck issue reported successfully.", false);
-          }
           return true;
         } catch (e) {
           debugPrint("Submit Issue Error: $e");
-          if (mounted) {
-            CustomNotification.showTopNotification(context, "Submission failed. Please check your connection.", true);
-          }
           return false;
         }
       }, loadingText: "Submitting report...");
@@ -1073,6 +1062,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
   }) async {
     return await showDialog(
       context: context,
+      useRootNavigator: true,
       builder: (context) => Dialog(
         backgroundColor: Colors.white,
         surfaceTintColor: Colors.white,
@@ -1111,28 +1101,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
 
   // --- OTHER MENU MODALS ---
 
-  void _showEditProfileModal() {
-    if (_isNavigating) return;
-    setState(() => _isNavigating = true);
-    
-    try {
-      _showModal("Edit Profile", [
-        _buildTextField("Full Legal Name", _nameController),
-        _buildTextField("Contact Number", _phoneController),
-        _buildTextField("Email Address", _emailController),
-        _buildTextField("Complete Address", _addressController),
-      ], "SAVE CHANGES", () async {
-        return await _handleUpdateProfile(
-          name: _nameController.text.trim(),
-          phone: _phoneController.text.trim(),
-          email: _emailController.text.trim(),
-          truck: _user?.preferredTruck ?? "",
-        );
-      });
-    } finally {
-      if (mounted) setState(() => _isNavigating = false);
-    }
-  }
 
   void _showChangePasswordModal() {
     if (_isNavigating) return;
@@ -1262,14 +1230,16 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       if (res.data['success'] == true) {
         if (mounted) {
           Navigator.of(context).pop();
-          CustomNotification.showTopNotification(context, "Password changed successfully!", false);
+          _showResultDialog(success: true, message: "Security credentials updated successfully.");
           _oldPasswordController.clear(); _newPasswordController.clear(); _confirmPasswordController.clear();
         }
       } else {
-        CustomNotification.showTopNotification(context, res.data['message'] ?? "Wrong current password");
+        _showResultDialog(success: false, message: res.data['message'] ?? "Invalid current password provided.");
       }
     } catch (e) {
-      CustomNotification.showTopNotification(context, "Connection issue. Try again.");
+      if (mounted) {
+        CustomNotification.showTopNotification(context, "Connection issue. Try again.");
+      }
     }
   }
 
@@ -1468,17 +1438,34 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
               final val = v as Map;
               final String type = (val['type'] ?? '').toString();
               final String? truckId = val['truck_id']?.toString() ?? val['truckId']?.toString();
-              
-              // Basic filter matching DriverDashboard logic
+              final String? targetUserId = val['targetUserId']?.toString() ?? val['userId']?.toString();
+              final String? targetRole = val['targetRole']?.toString().toLowerCase();
+
+              // 1. EXCLUDE Admin-only or Resident-focused types
+              if (['REGISTRATION', 'NEW_REGISTRATION', 'RESIDENT_COMPLAINT', 'COLLECTION_ALERT', 'manual_alert', 'auto_arrival', 'auto_approach', 'COMPLAINT_RESOLVED'].contains(type)) {
+                return;
+              }
+
               bool isRelevant = false;
-              if (truckId != null && truckId.isNotEmpty && truckId == _user?.preferredTruck) {
-                if (!['auto_arrival', 'auto_approach', 'manual_alert', 'COLLECTION_ALERT', 'COMPLAINT_RESOLVED'].contains(type)) {
+              
+              // 2. TARGETED: Explicitly for this User ID
+              if (targetUserId != null && targetUserId == _user?.userId.toString()) {
+                isRelevant = true;
+              }
+
+              // 3. ROLE-BASED: Targeted to all drivers or this specific driver role
+              if (targetRole == 'driver') {
+                if (truckId == null || truckId.isEmpty || truckId == _user?.preferredTruck) {
                   isRelevant = true;
                 }
               }
-              if (val['targetUserId']?.toString() == _user?.userId.toString()) isRelevant = true;
 
-              if (isRelevant) alerts.add(v); 
+              // 4. TRUCK-BASED: Relevant to the assigned truck (e.g., ISSUE_UPDATE, MAINTENANCE)
+              if (truckId != null && truckId.isNotEmpty && truckId == _user?.preferredTruck) {
+                 isRelevant = true; 
+              }
+
+              if (isRelevant) alerts.add(val);
             });
             
             if (alerts.isEmpty) {
@@ -1699,12 +1686,18 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
                     );
 
                     if (confirm) {
-                      await _handleUpdateProfile(
+                      final navigator = Navigator.of(context);
+                      bool success = await _handleUpdateProfile(
                         name: nameCtrl.text.trim(),
                         email: emailCtrl.text.trim(),
                         phone: phoneCtrl.text.trim(),
                         truck: truckCtrl.text.trim(),
                       );
+                      
+                      if (success && mounted) {
+                        navigator.pop(); // Close bottom sheet
+                        _showResultDialog(success: true, message: "Profile information updated successfully.");
+                      }
                     }
                   },
                 ),
@@ -1743,9 +1736,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         );
         await SessionManager.saveUser(updatedUser.toJson());
         _loadUser();
-        if (mounted) {
-          CustomNotification.showTopNotification(context, "Profile updated successfully!", false);
-        }
         return true;
       } else {
         CustomNotification.showTopNotification(context, res.data['message'] ?? "Update failed");
@@ -1759,16 +1749,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     }
   }
 
-  Widget _buildDataText(String label, String? val) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey)),
-        const SizedBox(height: 4),
-        Text(val ?? "N/A", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF2C3E50))),
-      ],
-    );
-  }
 
   void _showDeleteAccountConfirmation() async {
     bool confirmed = await _showConfirmActionDialog(
@@ -1794,36 +1774,6 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     }
   }
 
-  Future<void> _handleUpdatePassword() async {
-    final oldPass = _oldPasswordController.text.trim();
-    final newPass = _newPasswordController.text.trim();
-    final confirmPass = _confirmPasswordController.text.trim();
-
-    if (oldPass.isEmpty || newPass.isEmpty || confirmPass.isEmpty) {
-      CustomNotification.showTopNotification(context, "Please fill all fields"); return;
-    }
-    if (newPass.length < 6) {
-      CustomNotification.showTopNotification(context, "New password must be at least 6 characters"); return;
-    }
-    if (newPass != confirmPass) {
-      CustomNotification.showTopNotification(context, "Passwords do not match"); return;
-    }
-
-    try {
-      final res = await _apiService.changePassword(_user!.userId, _user!.role, oldPass, newPass);
-      if (res.data['success'] == true) {
-        if (mounted) {
-          Navigator.of(context).pop();
-          CustomNotification.showTopNotification(context, "Password changed successfully!", false);
-          _oldPasswordController.clear(); _newPasswordController.clear(); _confirmPasswordController.clear();
-        }
-      } else {
-        CustomNotification.showTopNotification(context, res.data['message'] ?? "Password change failed");
-      }
-    } catch (e) {
-      CustomNotification.showTopNotification(context, "Error: Connection issue during update");
-    }
-  }
 
 
   // --- UI UTILS ---
@@ -1881,55 +1831,71 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         ...body,
         if (btnText != null) ...[
           const SizedBox(height: 32),
-          StatefulBuilder(builder: (context, setModalState) {
+          StatefulBuilder(builder: (modalCtx, setModalState) {
             bool isModalLoading = false;
-            return HoverActionButton(
-              text: btnText,
-              loadingText: loadingText,
-              isLoading: isModalLoading,
-              useZoom: true,
-              onTap: isModalLoading ? null : () async {
-                // Capture the navigator before any await
-                final navigator = Navigator.of(context);
-                
-                bool confirmed = await _showConfirmActionDialog(
-                  title: title.contains("Report") ? "Submit Report?" : "Save Changes?",
-                  message: title.contains("Report") 
-                    ? "Are you sure you want to submit this issue report?" 
-                    : "Are you sure you want to proceed with these updates?",
-                  confirmText: title.contains("Report") ? "Yes, Submit" : "Yes, Save",
-                );
+            return StatefulBuilder(builder: (innerCtx, setInnerState) {
+              return HoverActionButton(
+                text: btnText,
+                loadingText: loadingText,
+                isLoading: isModalLoading,
+                useZoom: true,
+                onTap: isModalLoading ? null : () async {
+                  // Capture the navigator before any await
+                  final navigator = Navigator.of(innerCtx);
+                  
+                  bool confirmed = await _showConfirmActionDialog(
+                    title: title.contains("Report") ? "Submit Report?" : "Save Changes?",
+                    message: title.contains("Report") 
+                      ? "Are you sure you want to submit this issue report?" 
+                      : "Are you sure you want to proceed with these updates?",
+                    confirmText: title.contains("Report") ? "Yes, Submit" : "Yes, Save",
+                  );
 
-                if (confirmed && onBtnTap != null) {
-                  setModalState(() => isModalLoading = true);
-                  try {
-                    bool success = await onBtnTap();
-                    if (mounted) {
-                      setModalState(() => isModalLoading = false);
-                      if (success) {
-                        // Small delay to ensure previous dialog transitions are settled
-                        await Future.delayed(const Duration(milliseconds: 200));
-                        if (navigator.canPop()) {
-                          navigator.pop();
+                  if (confirmed && onBtnTap != null) {
+                    setInnerState(() => isModalLoading = true);
+                    try {
+                      bool success = await onBtnTap();
+                      if (mounted) {
+                        setInnerState(() => isModalLoading = false);
+                        if (success) {
+                          // Small delay to ensure previous dialog transitions are settled
+                          await Future.delayed(const Duration(milliseconds: 200));
+                          if (navigator.canPop()) {
+                            navigator.pop();
+                          }
+                          
+                          // Show Success feedback as a prominent dialog
+                          _showResultDialog(
+                            success: true, 
+                            message: title.contains("Report") 
+                              ? "Your truck issue has been successfully reported to the administration." 
+                              : "Changes have been saved successfully."
+                          );
+                        } else {
+                          // Show Failed feedback as a prominent dialog
+                          _showResultDialog(
+                            success: false, 
+                            message: "The action could not be completed. Please ensure all fields are correct and try again."
+                          );
                         }
                       }
+                    } catch (e) {
+                      if (mounted) {
+                        setInnerState(() => isModalLoading = false);
+                        debugPrint("Modal Action Error: $e");
+                        _showResultDialog(success: false, message: "Unable to complete action due to a connection error. Please try again.");
+                      }
                     }
-                  } catch (e) {
-                    if (mounted) setModalState(() => isModalLoading = false);
-                    debugPrint("Modal Action Error: $e");
                   }
-                }
-              },
-            );
+                },
+              );
+            });
           }),
         ],
       ],
     );
   }
 
-  Widget _buildInput(String label, TextEditingController controller, {bool isPassword = false}) {
-    return _buildTextField(label, controller, obscureText: isPassword);
-  }
 
   Widget _buildTextField(String label, TextEditingController controller, {
     bool obscureText = false, 
@@ -2015,6 +1981,55 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             activeThumbColor: AppColors.tealText
           ),
         ],
+      ),
+    );
+  }
+
+  void _showResultDialog({required bool success, required String message}) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      useRootNavigator: true,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: (success ? AppColors.statusGreen : Colors.redAccent).withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  success ? Icons.check_circle_rounded : Icons.error_rounded, 
+                  color: success ? AppColors.statusGreen : Colors.redAccent, 
+                  size: 48
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                success ? "Success!" : "Action Failed", 
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))
+              ),
+              const SizedBox(height: 16),
+              Text(
+                message, 
+                textAlign: TextAlign.center, 
+                style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w500, height: 1.5)
+              ),
+              const SizedBox(height: 32),
+              HoverActionButton(
+                text: "DONE",
+                onTap: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -172,13 +172,62 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     });
 
     _notificationSubscription?.cancel();
+    
+    // Track dashboard load time to avoid showing historical alerts as real-time popups
+    final int dashboardLoadTime = DateTime.now().millisecondsSinceEpoch;
+
     _notificationSubscription = _database.ref('notifications').onValue.listen((event) {
       if (event.snapshot.exists) {
         final Map data = event.snapshot.value as Map;
         int unread = 0;
+        
+        // Debug counters
+        int matched = 0;
+        int adminExcluded = 0;
+        int residentExcluded = 0;
+        int otherDriverExcluded = 0;
+
         data.forEach((k, v) {
-          if (v['isRead'] == false && v['truck_id'] == _user?.preferredTruck) unread++;
+          final val = v as Map;
+          bool forMe = _isNotificationForMe(val);
+          
+          if (forMe) {
+            matched++;
+            if (val['isRead'] == false) {
+              unread++;
+              
+              // NEW: Trigger real-time snackbar if it's a NEW notification while dashboard is open
+              final int ts = (val['timestamp'] ?? 0) as int;
+              if (ts > dashboardLoadTime && val['realtimeTriggered'] != true) {
+                // Mark locally as triggered to avoid duplicates in the same session
+                val['realtimeTriggered'] = true; 
+                _showSnackbar("${val['title']}: ${val['message']}");
+              }
+            }
+          } else {
+            // Determine exclusion reason for debug
+            final String type = (val['type'] ?? '').toString();
+            if (['REGISTRATION', 'NEW_REGISTRATION', 'RESIDENT_COMPLAINT'].contains(type)) {
+              adminExcluded++;
+            } else if (['auto_arrival', 'auto_approach', 'manual_alert', 'COLLECTION_ALERT', 'COMPLAINT_RESOLVED'].contains(type)) {
+              residentExcluded++;
+            } else {
+              otherDriverExcluded++;
+            }
+          }
         });
+
+        debugPrint("--- DRIVER NOTIFICATION DEBUG ---");
+        debugPrint("CURRENT DRIVER ID: ${_user?.userId}");
+        debugPrint("ASSIGNED TRUCK: ${_user?.preferredTruck}");
+        debugPrint("RAW NOTIFICATIONS: ${data.length}");
+        debugPrint("DRIVER MATCHED: $matched");
+        debugPrint("EXCLUDED ADMIN: $adminExcluded");
+        debugPrint("EXCLUDED RESIDENT: $residentExcluded");
+        debugPrint("EXCLUDED OTHER DRIVER: $otherDriverExcluded");
+        debugPrint("FINAL DRIVER ALERT COUNT: $matched (Unread: $unread)");
+        debugPrint("---------------------------------");
+
         if (mounted) setState(() => _unreadNotifications = unread);
       }
     });
@@ -1564,6 +1613,44 @@ Positioned(
     );
   }
 
+  bool _isNotificationForMe(Map val) {
+    final String type = (val['type'] ?? '').toString();
+    final String? truckId = val['truck_id']?.toString() ?? val['truckId']?.toString();
+    final String? targetUserId = val['targetUserId']?.toString() ?? val['userId']?.toString() ?? val['resident_id']?.toString();
+    final String? targetRole = val['targetRole']?.toString().toLowerCase();
+
+    // 1. STRICT EXCLUSION: Admin-only types
+    if (['REGISTRATION', 'NEW_REGISTRATION', 'RESIDENT_COMPLAINT'].contains(type)) {
+      return false;
+    }
+
+    // 2. STRICT EXCLUSION: Resident-only types (Even if they have truck_id)
+    if (['auto_arrival', 'auto_approach', 'manual_alert', 'COLLECTION_ALERT', 'COMPLAINT_RESOLVED'].contains(type)) {
+      return false;
+    }
+
+    // 3. TARGETED: Explicitly for this User ID
+    if (targetUserId != null && targetUserId == _user?.userId.toString()) {
+      return true;
+    }
+
+    // 4. ROLE-BASED: Targeted to all drivers or this specific driver role
+    if (targetRole == 'driver') {
+      if (truckId == null || truckId.isEmpty || truckId == _user?.preferredTruck) {
+        return true;
+      }
+    }
+
+    // 5. TRUCK-BASED: Relevant to the assigned truck (e.g., ISSUE_UPDATE, MAINTENANCE)
+    if (truckId != null && truckId.isNotEmpty && truckId == _user?.preferredTruck) {
+       // Only allow driver-relevant types if filtered by truck
+       // (Excluded resident types were already caught in step 2)
+       return true; 
+    }
+
+    return false;
+  }
+
   void _showAlertHistory() {
     final GlobalKey<AnimatedListState> listKey = GlobalKey<AnimatedListState>();
     List<Map> notifications = [];
@@ -1626,7 +1713,7 @@ Positioned(
                         List<Map> newList = [];
                         data.forEach((k, v) {
                           final val = v as Map;
-                          if (val['truck_id'] == _user?.preferredTruck) {
+                          if (_isNotificationForMe(val)) {
                             newList.add({...val, 'key': k});
                           }
                         });
