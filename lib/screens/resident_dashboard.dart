@@ -979,7 +979,7 @@ class _ResidentDashboardState extends State<ResidentDashboard> with TickerProvid
               ),
               const SizedBox(height: 4),
               Flexible(
-                child: StreamBuilder(
+                child: StreamBuilder<DatabaseEvent>(
                   stream: _database.ref('notifications').onValue,
                   builder: (context, snapshot) {
                     if (snapshot.hasData && snapshot.data!.snapshot.exists) {

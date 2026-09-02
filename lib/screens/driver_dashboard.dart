@@ -38,6 +38,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   String _currentTime = "";
   Timer? _clockTimer;
   Map<String, dynamic> _maintenanceData = {};
+  String? _truckPlateNumber;
+  StreamSubscription? _truckSubscription;
+  StreamSubscription? _userSubscription;
 
   // Header Animation
   late AnimationController _circleController;
@@ -106,6 +109,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   @override
   void dispose() {
+    _userSubscription?.cancel();
+    _truckSubscription?.cancel();
     _clockTimer?.cancel();
     _simulationTimer?.cancel();
     _positionSubscription?.cancel();
@@ -123,10 +128,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     if (_user != null) {
       if (mounted) setState(() {});
       _setupListeners();
+      _setupUserListener();
       
       final truckId = _user?.preferredTruck ?? "GT-001";
       
       _loadMaintenanceData(truckId);
+      _setupTruckListener();
 
       // Force Online/Active status immediately upon loading dashboard
       await _database.ref('truck_locations').child(truckId).update({
@@ -162,6 +169,51 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         if (mounted) {
           setState(() {
             _maintenanceData = Map<String, dynamic>.from(event.snapshot.value as Map);
+          });
+        }
+      }
+    });
+  }
+
+  void _setupUserListener() {
+    if (_user == null) return;
+    _userSubscription?.cancel();
+    
+    // Using current user ID
+    _userSubscription = _database.ref('users/${_user!.userId}').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        final Map data = event.snapshot.value as Map;
+        
+        if (mounted) {
+          setState(() {
+            // Merge Firebase data with current user object to avoid losing fields
+            final Map<String, dynamic> currentData = _user!.toJson();
+            data.forEach((k, v) => currentData[k] = v);
+            final updatedUser = UserData.fromJson(currentData);
+            
+            // Update local state and restart truck listener if truck ID changed
+            if (_user?.preferredTruck != updatedUser.preferredTruck) {
+              _user = updatedUser;
+              _setupTruckListener();
+            } else {
+              _user = updatedUser;
+            }
+          });
+        }
+      }
+    });
+  }
+
+  void _setupTruckListener() {
+    _truckSubscription?.cancel();
+    final truckId = _user?.preferredTruck ?? "GT-001";
+
+    _truckSubscription = _database.ref('trucks/$truckId').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        final data = event.snapshot.value as Map;
+        if (mounted) {
+          setState(() {
+            _truckPlateNumber = data['plateNumber']?.toString() ?? "N/A";
           });
         }
       }
@@ -1470,7 +1522,7 @@ Positioned(
         const SizedBox(height: 24),
         _buildInfoRow("Truck Number", _user?.preferredTruck ?? "GT-001", color: AppColors.tealText),
         const Divider(height: 24),
-        _buildInfoRow("Plate Number", "ABC 1234", isBold: true),
+        _buildInfoRow("Plate Number", _truckPlateNumber ?? "N/A", isBold: true),
         const Divider(height: 24),
         _buildInfoRow("Start Time", _startTime),
         const Divider(height: 24),
@@ -1819,7 +1871,7 @@ Positioned(
               Flexible(
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 28),
-                  child: StreamBuilder(
+                  child: StreamBuilder<DatabaseEvent>(
                     stream: _database.ref('notifications').onValue,
                     builder: (context, snapshot) {
                       if (snapshot.hasData && snapshot.data!.snapshot.exists) {

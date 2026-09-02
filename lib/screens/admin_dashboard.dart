@@ -591,7 +591,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       child: Container(constraints: const BoxConstraints(maxWidth: 600), padding: const EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, children: [
         Row(children: [const Icon(Icons.notifications_active_outlined, color: Color(0xFF00BFA5), size: 28), const SizedBox(width: 12), const Expanded(child: Text("Notifications", style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A)))), TextButton(onPressed: () async { await _database.ref('notification_logs').remove(); if (mounted) Navigator.pop(context); }, child: const Text("Clear All", style: TextStyle(color: Color(0xFF00BFA5), fontWeight: FontWeight.w900)))]),
         const SizedBox(height: 24),
-        Flexible(child: StreamBuilder(stream: _database.ref('notification_logs').onValue, builder: (context, snapshot) {
+        Flexible(child: StreamBuilder<DatabaseEvent>(stream: _database.ref('notification_logs').onValue, builder: (context, snapshot) {
           if (snapshot.hasData && snapshot.data!.snapshot.exists) {
             final Map? data = snapshot.data!.snapshot.value as Map?;
             if (data == null) return const Center(child: Text("No notifications"));

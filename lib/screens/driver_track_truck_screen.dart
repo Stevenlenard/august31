@@ -71,6 +71,8 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   // NEW: Follow Mode State
   bool _isFollowLocked = true;
   String _currentStatus = "ACTIVE";
+  String? _truckPlateNumber;
+  StreamSubscription? _truckMetaSubscription;
 
   // Modal Info State
   String _startTime = "--:--";
@@ -90,6 +92,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     }
     _checkPermissionAndStartGps();
     _listenToTrucks();
+    _listenToTruckMeta();
     _listenToRoute();
   }
 
@@ -113,9 +116,42 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   }
 
   @override
+  void didUpdateWidget(DriverTrackTruckScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusTruckId != widget.focusTruckId) {
+      _listenToTrucks();
+      _listenToTruckMeta();
+    }
+    if (oldWidget.currentSessionId != widget.currentSessionId) {
+      _listenToRoute();
+    }
+    if (oldWidget.manualPosition != widget.manualPosition && widget.manualPosition != null) {
+      _lastLocalPos = widget.manualPosition;
+      _updateLocalDriverMarker(widget.manualPosition!);
+    }
+  }
+
+  void _listenToTruckMeta() {
+    _truckMetaSubscription?.cancel();
+    final String tid = (widget.focusTruckId ?? "GT-001").toUpperCase();
+    
+    _truckMetaSubscription = _database.ref('trucks/$tid').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        final data = event.snapshot.value as Map;
+        if (mounted) {
+          setState(() {
+            _truckPlateNumber = data['plateNumber']?.toString();
+          });
+        }
+      }
+    });
+  }
+
+  @override
   void dispose() {
     _clockTimer?.cancel();
     _truckSubscription?.cancel();
+    _truckMetaSubscription?.cancel();
     _routeSubscription?.cancel();
     _routeMetaSubscription?.cancel();
     _localGpsSubscription?.cancel();
@@ -620,7 +656,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           content: [
             _buildInfoRow("Truck Number", _user?.preferredTruck ?? "GT-001", color: AppColors.tealText),
             const Divider(height: 24),
-            _buildInfoRow("Plate Number", "ABC 1234", isBold: true),
+            _buildInfoRow("Plate Number", _truckPlateNumber ?? "N/A", isBold: true),
             const Divider(height: 24),
             _buildInfoRow("Start Time", _startTime),
             const Divider(height: 24),

@@ -35,6 +35,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
   UserData? _user;
   
   bool _isNavigating = false;
+  StreamSubscription? _userSubscription;
 
   // Settings values
   bool _dutyAlerts = true;
@@ -46,6 +47,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
   String _gpsAccuracy = "Checking...";
   final String _appVersion = "1.0.0";
   String? _truckPlateNumber;
+  StreamSubscription? _truckSubscription;
 
   // Controllers for edit profile
   final _nameController = TextEditingController();
@@ -68,6 +70,8 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
 
   @override
   void dispose() {
+    _userSubscription?.cancel();
+    _truckSubscription?.cancel();
     _nameController.dispose();
     _phoneController.dispose();
     _emailController.dispose();
@@ -85,18 +89,58 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       _phoneController.text = _user!.phone ?? "";
       _emailController.text = _user!.email;
       _addressController.text = _user!.completeAddress ?? "";
-      _loadTruckDetails();
+      _setupTruckListener();
+      _setupUserListener();
     }
     if (mounted) setState(() {});
   }
 
+  void _setupUserListener() {
+    if (_user == null) return;
+    _userSubscription?.cancel();
+    
+    _userSubscription = _database.ref('users/${_user!.userId}').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        final Map data = event.snapshot.value as Map;
+        
+        if (mounted) {
+          setState(() {
+            // Merge Firebase data with current user object to avoid losing fields
+            final Map<String, dynamic> currentData = _user!.toJson();
+            data.forEach((k, v) => currentData[k] = v);
+            final updatedUser = UserData.fromJson(currentData);
+            
+            if (_user?.preferredTruck != updatedUser.preferredTruck) {
+              _user = updatedUser;
+              _setupTruckListener(); // Restart truck listener if truck ID changed
+            } else {
+              _user = updatedUser;
+            }
+          });
+        }
+      }
+    });
+  }
+
+  void _setupTruckListener() {
+    _truckSubscription?.cancel();
+    final truckId = _user?.preferredTruck;
+    if (truckId == null || truckId.isEmpty) return;
+
+    _truckSubscription = _database.ref('trucks/$truckId').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        final data = event.snapshot.value as Map;
+        if (mounted) {
+          setState(() {
+            _truckPlateNumber = data['plateNumber']?.toString() ?? "N/A";
+          });
+        }
+      }
+    });
+  }
+
   void _loadTruckDetails() async {
-    if (_user?.preferredTruck == null) return;
-    final snapshot = await _database.ref('trucks/${_user!.preferredTruck}').get();
-    if (snapshot.exists) {
-      final data = snapshot.value as Map;
-      if (mounted) setState(() => _truckPlateNumber = data['plateNumber']?.toString());
-    }
+    // This is now handled by _setupTruckListener
   }
 
   void _loadSettings() async {
@@ -521,17 +565,9 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     setState(() => _isNavigating = true);
 
     try {
-      final truckId = _user?.preferredTruck ?? "GT-001";
-      final ref = _database.ref('trucks/$truckId');
-      final snapshot = await ref.get();
-      
-      Map<String, dynamic> truckData = {};
-      if (snapshot.exists) {
-        truckData = Map<String, dynamic>.from(snapshot.value as Map);
-      }
-
-      final idCtrl = TextEditingController(text: truckId);
-      final plateCtrl = TextEditingController(text: truckData['plateNumber'] ?? "");
+      final currentTruckId = _user?.preferredTruck ?? "GT-001";
+      final idCtrl = TextEditingController(text: currentTruckId);
+      final plateCtrl = TextEditingController(text: _truckPlateNumber ?? "");
 
       if (!context.mounted) return;
 
@@ -539,20 +575,59 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
         _buildTextField("Truck ID", idCtrl),
         _buildTextField("Plate Number", plateCtrl),
       ], "SAVE CHANGES", () async {
-        if (plateCtrl.text.isEmpty) {
+        final newTruckId = idCtrl.text.trim();
+        final newPlate = plateCtrl.text.trim();
+
+        if (newTruckId.isEmpty || newPlate.isEmpty) {
           return false;
         }
 
-        await ref.update({
-          'plateNumber': plateCtrl.text.trim(),
-          'lastUpdatedBy': _user?.userId,
-          'updatedAt': ServerValue.timestamp,
-        });
-        
-        if (mounted) {
-          _loadUser(); // Refresh to update plate number in profile card if needed
+        try {
+          // 1. Update the truck document (Metadata) - AUTHORITATIVE
+          await _database.ref('trucks/$newTruckId').update({
+            'truckId': newTruckId,
+            'plateNumber': newPlate,
+            'lastUpdatedBy': _user?.userId,
+            'updatedAt': ServerValue.timestamp,
+          });
+
+          // 2. Update Firebase user node (Triggers real-time sync across all screens)
+          await _database.ref('users/${_user!.userId}').update({
+            'preferred_truck': newTruckId,
+            'lastUpdated': ServerValue.timestamp,
+          });
+
+          debugPrint("[TRUCK_SAVE] Firebase updates succeeded for $newTruckId");
+
+          // 3. Update SQL backend (Non-blocking sync)
+          try {
+            final response = await _apiService.updateProfile(
+              userId: _user!.userId,
+              role: _user!.role,
+              name: _user!.name,
+              phone: _user!.phone ?? "",
+              email: _user!.email,
+              preferredTruck: newTruckId,
+              address: _user!.completeAddress ?? "",
+            );
+
+            if (response.data['success'] == true) {
+              final updatedUser = _user!.copyWith(preferredTruck: newTruckId);
+              await SessionManager.saveUser(updatedUser.toJson());
+              debugPrint("[TRUCK_SAVE] SQL Backend sync succeeded");
+            } else {
+              debugPrint("[TRUCK_SAVE] SQL Backend reported failure: ${response.data['message']}");
+            }
+          } catch (e) {
+            // Log but don't fail the whole operation if Firebase worked
+            debugPrint("[TRUCK_SAVE] SQL Backend communication error (ignored): $e");
+          }
+          
+          return true; // We return true because the authoritative Firebase update worked
+        } catch (e) {
+          debugPrint("[TRUCK_SAVE] Authoritative Firebase update failed: $e");
+          rethrow; // This will trigger the Error Dialog in _showModal
         }
-        return true;
       });
     } finally {
       if (mounted) setState(() => _isNavigating = false);
@@ -623,7 +698,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
           const Text("Upcoming truck service dates", style: TextStyle(color: Colors.grey, fontSize: 13)),
           const SizedBox(height: 20),
           // Listen to Truck Location for LIVE distance subtraction
-          StreamBuilder(
+          StreamBuilder<DatabaseEvent>(
             stream: _database.ref('truck_locations/$truckId').onValue,
             builder: (context, locSnapshot) {
               double currentTripDist = 0.0;
@@ -635,7 +710,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
                 }
               }
 
-              return StreamBuilder(
+              return StreamBuilder<DatabaseEvent>(
                 stream: _database.ref('trucks/$truckId/maintenance').onValue,
                 builder: (context, snapshot) {
                   if (snapshot.hasError) return Text("Error: ${snapshot.error}");
@@ -929,7 +1004,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       _showStyledBottomSheet(
         title: "Issue History",
         children: [
-          StreamBuilder(
+          StreamBuilder<DatabaseEvent>(
             stream: _database.ref('truck_issues').orderByChild('driverId').equalTo(_user?.userId).onValue,
             builder: (context, snapshot) {
               if (snapshot.hasError) return Text("Error: ${snapshot.error}");
@@ -1436,7 +1511,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     try {
       final truckId = _user?.preferredTruck ?? "GT-001";
       _showModal("Performance Stats", [
-        StreamBuilder(
+        StreamBuilder<DatabaseEvent>(
           stream: _database.ref('truck_locations/$truckId').onValue,
           builder: (context, snapshot) {
             if (snapshot.hasError) return Text("Error: ${snapshot.error}");
@@ -1467,7 +1542,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
 
     try {
       _showModal("Alert History", [
-        StreamBuilder(
+        StreamBuilder<DatabaseEvent>(
           stream: _database.ref('notifications').onValue,
           builder: (context, snapshot) {
             if (snapshot.hasError) return Text("Error: ${snapshot.error}");
@@ -1770,6 +1845,15 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       );
 
       if (res.data['success'] == true) {
+        // Update Firebase user node for real-time sync
+        await _database.ref('users/${_user!.userId}').update({
+          'name': name,
+          'email': email,
+          'phone': phone,
+          'preferred_truck': truck,
+          'lastUpdated': ServerValue.timestamp,
+        });
+
         final updatedUser = _user!.copyWith(
           name: name,
           phone: phone,
@@ -1777,7 +1861,13 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
           preferredTruck: truck,
         );
         await SessionManager.saveUser(updatedUser.toJson());
-        _loadUser();
+        
+        if (mounted) {
+          setState(() {
+            _user = updatedUser;
+          });
+          _setupTruckListener(); // Restart truck listener in case it changed
+        }
         return true;
       } else {
         CustomNotification.showTopNotification(context, res.data['message'] ?? "Update failed");
@@ -1925,7 +2015,13 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
                       if (mounted) {
                         setInnerState(() => isModalLoading = false);
                         debugPrint("Modal Action Error: $e");
-                        _showResultDialog(success: false, message: "Unable to complete action due to a connection error. Please try again.");
+                        
+                        String errorMsg = "Unable to complete action due to a connection error. Please try again.";
+                        if (e.toString().contains("404") || e.toString().contains("500")) {
+                          errorMsg = "Server error occurred while syncing data. Please contact support.";
+                        }
+                        
+                        _showResultDialog(success: false, message: errorMsg);
                       }
                     }
                   }
