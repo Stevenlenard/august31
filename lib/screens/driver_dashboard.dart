@@ -130,7 +130,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       _setupListeners();
       _setupUserListener();
       
-      final truckId = _user?.preferredTruck ?? "GT-001";
+      final truckId = _user?.preferredTruck ?? "Unknown";
       
       _loadMaintenanceData(truckId);
       _setupTruckListener();
@@ -206,7 +206,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   void _setupTruckListener() {
     _truckSubscription?.cancel();
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
 
     _truckSubscription = _database.ref('trucks/$truckId').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
@@ -221,7 +221,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   void _setupListeners() {
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     _statusSubscription?.cancel();
     _statusSubscription = _database.ref('truck_locations').child(truckId).onValue.listen((event) {
       if (event.snapshot.exists) {
@@ -307,7 +307,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       if (isConnected && _sessionId != null && _user != null) {
         debugPrint("[CONNECTION] Reconnected. Restoring active status...");
         // If we have an active session, ensure we are ACTIVE and Online
-        _database.ref('truck_locations').child(_user?.preferredTruck ?? "GT-001").update({
+        _database.ref('truck_locations').child(_user?.preferredTruck ?? "Unknown").update({
            'isOnline': true,
            'status': (_status.contains("LOST") || _status == "OFFLINE") ? "ACTIVE" : _status,
            'updatedAt': DateTime.now().toIso8601String(),
@@ -359,7 +359,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
             _purokStatus = Map<String, dynamic>.from(data);
             _completedCount = completed;
           });
-          final truckId = _user?.preferredTruck ?? "GT-001";
+          final truckId = _user?.preferredTruck ?? "Unknown";
           _database.ref('truck_locations').child(truckId).update({
             'visited_puroks': completed,
             'efficiency': (completed / _totalPuroks) * 100,
@@ -380,7 +380,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       }
     }
 
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     final driverId = _user?.userId ?? "Unknown";
 
     try {
@@ -395,6 +395,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         'isOnline': true,
         'driver_id': driverId,
         'driver_name': _user?.name ?? 'Driver',
+        '   plate_number': _truckPlateNumber,
         'start_time': timeStr,
         'server_start_time': ServerValue.timestamp,
         'latitude': startPos.latitude,
@@ -488,7 +489,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       return;
     }
 
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     
     double traveled = 0;
 
@@ -557,6 +558,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     String trailColor = _getTrailColorForStatus(effectiveStatus);
 
     _database.ref('truck_locations').child(truckId).update({
+      'truck_id': truckId, // NEW: Include ID in the node data
       'latitude': pos.latitude,
       'longitude': pos.longitude,
       'distance': _distance,
@@ -566,6 +568,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       'accuracy': pos.accuracy,
       'status': effectiveStatus, 
       'isOnline': true,
+      'plate_number': _truckPlateNumber,
       'lastSeen': ServerValue.timestamp,
       'updatedAt': DateTime.now().toIso8601String(),
     });
@@ -634,7 +637,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           'distanceToCenter': dist,
         });
         
-        _database.ref('truck_locations').child(_user?.preferredTruck ?? "GT-001").update({'current_purok': p['name']});
+        _database.ref('truck_locations').child(_user?.preferredTruck ?? "Unknown").update({'current_purok': p['name']});
         
         // --- NEW: Automatic Approach/Arrival Notifications ---
         _handleAutoNotifications(p['name'], dist);
@@ -651,7 +654,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       return;
     }
     
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     
     // 1. Send "Arrived" notification to Firebase
     await _database.ref('notifications').push().set({
@@ -675,7 +678,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       return;
     }
     
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     
     // Calculate simple ETA (Assume 15 km/h for arrival)
     double speedMps = 15 / 3.6; 
@@ -724,7 +727,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   Future<void> _updateTripStatus(String newStatus) async {
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     await _database.ref('truck_locations').child(truckId).update({
       'status': newStatus.toUpperCase(),
       'updatedAt': DateTime.now().toIso8601String(),
@@ -741,7 +744,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     
     setState(() => _isFinishing = true);
     final String sessionToFinalize = _sessionId!;
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     
     try {
       await _database.ref('driver_routes').child(sessionToFinalize).update({
@@ -790,7 +793,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   void _checkMaintenanceThresholds() async {
     if (_maintenanceData.isEmpty || _user == null) return;
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
 
     final categories = ['oilChange', 'tireRotation', 'fullInspection'];
     final labels = {
@@ -935,7 +938,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     if (_sessionId == null) {
       return;
     }
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     
     try {
       // 1. Send Notification (Target specific Purok residents)
@@ -970,7 +973,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   Future<void> _handleLogout() async {
     _positionSubscription?.cancel();
-    final truckId = _user?.preferredTruck ?? "GT-001";
+    final truckId = _user?.preferredTruck ?? "Unknown";
     await _database.ref('truck_locations').child(truckId).update({'status': 'OFFLINE', 'isOnline': false, 'lastSeen': ServerValue.timestamp});
     await SessionManager.logout();
     if (mounted) {
@@ -999,7 +1002,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
                   child: DriverTrackTruckScreen(
                     isEmbedded: false, 
                     currentSessionId: _sessionId, 
-                    focusTruckId: _user?.preferredTruck ?? "GT-001", 
+                    focusTruckId: _user?.preferredTruck ?? "Unknown", 
                     onBack: () => setState(() => _selectedIndex = 0),
                     isSimulation: _isSimulationMode,
                     manualPosition: _currentPosition, // ALWAYS pass current position from the main tracking service
@@ -1488,7 +1491,7 @@ Positioned(
             child: DriverTrackTruckScreen(
               isEmbedded: true, 
               currentSessionId: _sessionId, 
-              focusTruckId: _user?.preferredTruck ?? "GT-001",
+              focusTruckId: _user?.preferredTruck ?? "Unknown",
               isSimulation: _isSimulationMode,
               manualPosition: _currentPosition, // Pass current position for real-time dashboard tracking
             )
@@ -1520,7 +1523,7 @@ Positioned(
           ],
         ),
         const SizedBox(height: 24),
-        _buildInfoRow("Truck Number", _user?.preferredTruck ?? "GT-001", color: AppColors.tealText),
+        _buildInfoRow("Truck Number", _user?.preferredTruck ?? "Unknown", color: AppColors.tealText),
         const Divider(height: 24),
         _buildInfoRow("Plate Number", _truckPlateNumber ?? "N/A", isBold: true),
         const Divider(height: 24),
