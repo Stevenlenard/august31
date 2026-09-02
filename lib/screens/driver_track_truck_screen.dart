@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size, Visibility;
@@ -436,13 +437,15 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     try {
       final style = mapboxMap!.style;
       bool sourceExists = await style.styleSourceExists(sourceId);
-      if (!_specialMarkersCreated || !sourceExists) {
-        if (!sourceExists) await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(geojson)));
+      
+      if (!sourceExists) {
+        await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(geojson)));
         
         if (!(await style.styleLayerExists("driver-special-circles"))) {
           await style.addLayer(CircleLayer(
             id: "driver-special-circles", sourceId: sourceId, 
-            circleRadius: 6.0, circleStrokeWidth: 2.0, circleStrokeColor: Colors.white.toARGB32(),
+            circleRadius: 8.0, circleStrokeWidth: 3.0, circleStrokeColor: Colors.white.toARGB32(),
+            circleSortKey: 3000.0,
           ));
           await style.setStyleLayerProperty("driver-special-circles", "circle-color", 
             ["match", ["get", "type"], "START", "#2196F3", "#000000"] // Blue for START, Black for FINISH
@@ -451,20 +454,20 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         if (!(await style.styleLayerExists("driver-special-labels"))) {
           await style.addLayer(SymbolLayer(
             id: "driver-special-labels", sourceId: sourceId, 
-            textField: "{label}", textSize: 11.0, textHaloColor: Colors.white.toARGB32(), textHaloWidth: 2.0,
+            textField: "{label}", textSize: 12.0, textHaloColor: Colors.white.toARGB32(), textHaloWidth: 2.5,
+            textAnchor: TextAnchor.TOP, textOffset: [0, 1.0], symbolSortKey: 3010.0,
           ));
-          await style.setStyleLayerProperty("driver-special-labels", "text-offset", 
-            ["match", ["get", "type"], "START", ["literal", [0, 1.5]], ["literal", [0, -1.5]]]
-          );
           await style.setStyleLayerProperty("driver-special-labels", "text-color", 
-            ["match", ["get", "type"], "START", "#2196F3", "#000000"]
+            ["match", ["get", "type"], "START", "#1976D2", "#000000"]
           );
         }
         if (mounted) setState(() => _specialMarkersCreated = true);
       } else {
         await style.setStyleSourceProperty(sourceId, "data", jsonEncode(geojson));
       }
-    } catch (e) {}
+    } catch (e) {
+      debugPrint("[SPECIAL MARKERS] Update Error: $e");
+    }
   }
 
   void _updateSingleTruckMarker(String id, Map data) {
@@ -489,39 +492,112 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   }
 
   void _updateRoutePolyline(List<Map> points) async {
-    if (mapboxMap == null || points.length < 2) { if (points.isEmpty) _clearRoute(); return; }
-    
-    points.sort((a, b) => (a['timestamp'] as num).compareTo(b['timestamp'] as num));
+    if (mapboxMap == null) return;
+    if (points.isEmpty && _lastSessionData == null) {
+      _clearRoute();
+      return;
+    }
 
-    final List<Map> smoothedPoints = [];
-    if (points.isNotEmpty) {
-      smoothedPoints.add(points.first);
-      for (int i = 1; i < points.length; i++) {
-        final prev = smoothedPoints.last;
-        final curr = points[i];
-        final double d = geo.Geolocator.distanceBetween(
-          (prev['lat'] ?? 0.0).toDouble(), (prev['lng'] ?? 0.0).toDouble(),
-          (curr['lat'] ?? 0.0).toDouble(), (curr['lng'] ?? 0.0).toDouble()
-        );
-        if (d > 4.0 || prev['status'] != curr['status'] || i == points.length - 1) smoothedPoints.add(curr);
+    // 1. Prepare points including Start Point and LIVE position
+    final List<Map> allPoints = [];
+    
+    // A. Add Start Point from Session Meta
+    if (_lastSessionData != null && _lastSessionData!['start_lat'] != null) {
+      allPoints.add({
+        'lat': _lastSessionData!['start_lat'],
+        'lng': _lastSessionData!['start_lng'],
+        'status': 'START',
+        'color': 'BLUE',
+        'timestamp': _lastSessionData!['timestamp'] ?? 0
+      });
+    }
+
+    // B. Add all recorded points
+    allPoints.addAll(points);
+
+    // C. Add Live Position (ensures line always reaches the driver marker)
+    if (_lastLocalPos != null) {
+      allPoints.add({
+        'lat': _lastLocalPos!.latitude,
+        'lng': _lastLocalPos!.longitude,
+        'status': _currentStatus,
+        'color': _currentStatus == "IDLE" ? "YELLOW" : (_currentStatus == "FULL" ? "PINK" : "GREEN"),
+        'timestamp': DateTime.now().millisecondsSinceEpoch
+      });
+    }
+
+    // D. Sort everything by timestamp to ensure correct sequence
+    allPoints.sort((a, b) => (a['timestamp'] as num).compareTo(b['timestamp'] as num));
+
+    // 2. EDGE-BASED CLEANING & SMOOTHING
+    final List<Map> filtered = [];
+    if (allPoints.isNotEmpty) {
+      filtered.add(allPoints.first);
+      for (int i = 1; i < allPoints.length; i++) {
+        final prev = filtered.last;
+        final curr = allPoints[i];
+        
+        final double lat = (curr['lat'] ?? 0.0).toDouble();
+        final double lng = (curr['lng'] ?? 0.0).toDouble();
+        final double prevLat = (prev['lat'] ?? 0.0).toDouble();
+        final double prevLng = (prev['lng'] ?? 0.0).toDouble();
+
+        final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, lat, lng);
+        final int timeDiff = (curr['timestamp'] as int) - (prev['timestamp'] as int);
+
+        // FILTER: Outlier jump detection (Speed check)
+        // Ignore jumps over 150m in less than 10 seconds (likely GPS error)
+        if (timeDiff > 0 && timeDiff < 10000 && d > 150) {
+           debugPrint("[GPS CLEANER] Filtered outlier jump: ${d.toStringAsFixed(1)}m");
+           continue;
+        }
+
+        // FILTER: Distance-based jitter reduction
+        // ignore points that haven't moved enough (5.0m threshold) UNLESS status changed
+        if (d < 5.0 && i != allPoints.length - 1 && prev['status'] == curr['status']) {
+           continue;
+        }
+
+        filtered.add(curr);
       }
     }
 
-    final String sourceId = "driver-route-source";
-    final List<Map<String, dynamic>> segments = [];
-    
-    for (int i = 1; i < smoothedPoints.length; i++) {
-      final prev = smoothedPoints[i - 1];
-      final curr = smoothedPoints[i];
-      final String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
-      final bool isGap = ((curr['timestamp'] ?? 0) as int) - ((prev['timestamp'] ?? 0) as int) > 60000;
+    // 3. Geometry Simplification (Douglas-Peucker) per status segment
+    final List<Map> processed = [];
+    if (filtered.isNotEmpty) {
+      int start = 0;
+      for (int i = 1; i <= filtered.length; i++) {
+        if (i == filtered.length || filtered[i]['status'] != filtered[start]['status']) {
+          final segment = filtered.sublist(start, i);
+          // Epsilon 0.00002 (~2.2 meters) removes small jitter while keeping road turns accurate.
+          final simplified = _simplifyPoints(segment, 0.00002);
+          if (processed.isNotEmpty) {
+            processed.addAll(simplified.skip(1));
+          } else {
+            processed.addAll(simplified);
+          }
+          start = i;
+        }
+      }
+    }
 
-      if (!isGap) {
-        if (segments.isNotEmpty && segments.last['properties']['color'] == color) {
-          final List coords = segments.last['geometry']['coordinates'];
+    // 4. Group into status-colored connected paths (GeoJSON)
+    final String sourceId = "driver-route-source";
+    final List<Map<String, dynamic>> features = [];
+
+    if (processed.length >= 2) {
+      for (int i = 1; i < processed.length; i++) {
+        final prev = processed[i - 1];
+        final curr = processed[i];
+        
+        String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
+        if (color == "BLUE") color = "GREEN"; 
+
+        if (features.isNotEmpty && features.last['properties']['color'] == color) {
+          final List coords = features.last['geometry']['coordinates'];
           coords.add([(curr['lng'] ?? 0.0).toDouble(), (curr['lat'] ?? 0.0).toDouble()]);
         } else {
-          segments.add({
+          features.add({
             "type": "Feature",
             "geometry": {
               "type": "LineString",
@@ -530,33 +606,71 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
                 [(curr['lng'] ?? 0.0).toDouble(), (curr['lat'] ?? 0.0).toDouble()]
               ]
             },
-            "properties": {"color": color, "isGap": false}
+            "properties": {"color": color}
           });
         }
       }
     }
 
-    final featureCollection = {"type": "FeatureCollection", "features": segments};
-    
+    final featureCollection = {"type": "FeatureCollection", "features": features};
+
     try {
       final style = mapboxMap!.style;
       bool sourceCreated = await style.styleSourceExists(sourceId);
       if (!sourceCreated) {
         await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(featureCollection)));
-        try { await style.removeStyleLayer("driver-route-layer"); } catch(_) {}
-        await style.addLayer(LineLayer(
-          id: "driver-route-layer", sourceId: sourceId, 
-          lineColor: Colors.green.toARGB32(), lineWidth: 10.0, lineOpacity: 1.0, 
-          lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND
-        ));
-        await style.setStyleLayerProperty("driver-route-layer", "line-color", [
-          "match", ["get", "color"],
-          "GREEN", "#00FF00", "YELLOW", "#FFFF00", "PINK", "#FF1493", "BLACK", "#000000", "BLUE", "#0000FF", "#00FF00"
-        ]);
+        
+        if (!(await style.styleLayerExists("driver-route-layer"))) {
+          await style.addLayer(LineLayer(
+            id: "driver-route-layer", sourceId: sourceId, 
+            lineColor: Colors.green.toARGB32(), lineWidth: 6.0, lineOpacity: 1.0, 
+            lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND
+          ));
+          
+          await style.setStyleLayerProperty("driver-route-layer", "line-color", [
+            "match", ["get", "color"],
+            "GREEN", "#4CAF50", 
+            "YELLOW", "#FFEB3B", 
+            "PINK", "#E91E63", 
+            "BLACK", "#212121", 
+            "#4CAF50"
+          ]);
+        }
+        if (mounted) setState(() => _routeSourceCreated = true);
       } else { 
         await style.setStyleSourceProperty(sourceId, "data", jsonEncode(featureCollection)); 
       }
-    } catch (e) {}
+    } catch (e) {
+      debugPrint("[ROUTE LINE] Update Error: $e");
+    }
+  }
+
+  List<Map> _simplifyPoints(List<Map> points, double epsilon) {
+    if (points.length < 3) return points;
+    int index = -1;
+    double maxDist = 0;
+    for (int i = 1; i < points.length - 1; i++) {
+      double d = _perpendicularDistance(points[i], points.first, points.last);
+      if (d > maxDist) { index = i; maxDist = d; }
+    }
+    if (maxDist > epsilon) {
+      List<Map> res1 = _simplifyPoints(points.sublist(0, index + 1), epsilon);
+      List<Map> res2 = _simplifyPoints(points.sublist(index), epsilon);
+      return [...res1.sublist(0, res1.length - 1), ...res2];
+    }
+    return [points.first, points.last];
+  }
+
+  double _perpendicularDistance(Map p, Map start, Map end) {
+    double x = (p['lng'] as num).toDouble(); double y = (p['lat'] as num).toDouble();
+    double x1 = (start['lng'] as num).toDouble(); double y1 = (start['lat'] as num).toDouble();
+    double x2 = (end['lng'] as num).toDouble(); double y2 = (end['lat'] as num).toDouble();
+    double dx = x2 - x1; double dy = y2 - y1;
+    if (dx == 0 && dy == 0) return sqrt(pow(x - x1, 2) + pow(y - y1, 2));
+    double t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy);
+    if (t < 0) return sqrt(pow(x - x1, 2) + pow(y - y1, 2));
+    if (t > 1) return sqrt(pow(x - x2, 2) + pow(y - y2, 2));
+    return sqrt(pow(x - (x1 + t * dx), 2) + pow(y - (y1 + t * dy), 2));
   }
 
   void _clearRoute() async {
@@ -636,13 +750,19 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         const SizedBox(height: 12),
         Center(child: Container(width: 50, height: 6, decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)))),
         const SizedBox(height: 32),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 28),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text("Live Route Tracking", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
-              Text("Searching...", style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)),
+              Text(
+                _lastSessionData == null ? "Searching Tracking..." : "Live Route Tracking", 
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))
+              ),
+              Text(
+                _lastSessionData == null ? "Establishing GPS connection" : "Tracking assigned truck", 
+                style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)
+              ),
             ],
           ),
         ),
@@ -737,9 +857,9 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
-            color: Colors.green.withOpacity(0.1),
+            color: Colors.green.withValues(alpha: 0.1),
             borderRadius: BorderRadius.circular(20), // Oval
-            border: Border.all(color: Colors.green.withOpacity(0.2)),
+            border: Border.all(color: Colors.green.withValues(alpha: 0.2)),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -872,9 +992,9 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.9), 
+          color: Colors.white.withValues(alpha: 0.9), 
           borderRadius: BorderRadius.circular(20), 
-          boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10, offset: const Offset(0, 4))]
+          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 4))]
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,

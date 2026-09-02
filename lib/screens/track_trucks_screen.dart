@@ -253,100 +253,209 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
 
   void _updateWebSharedRoute(String truckId, List<Map> points) async {
     if (!kIsWeb || mapboxMap == null) return;
-    final List<Map<String, dynamic>> webPoints = points.map((p) => {
-      'lat': (p['lat'] ?? 0.0).toDouble(),
-      'lng': (p['lng'] ?? 0.0).toDouble(),
-      'color': (p['color'] ?? 'GREEN').toString().toUpperCase(),
-      'timestamp': p['timestamp'],
-    }).toList();
-    _webSharedRouteData[truckId] = webPoints;
+    
+    // 1. numerical sort
+    points.sort((a, b) => (a['timestamp'] as num).compareTo(b['timestamp'] as num));
+
+    // 2. EDGE-BASED CLEANING & SMOOTHING (Douglas-Peucker)
+    final List<Map<String, dynamic>> filtered = [];
+    if (points.isNotEmpty) {
+      filtered.add({
+        'lat': (points.first['lat'] ?? 0.0).toDouble(),
+        'lng': (points.first['lng'] ?? 0.0).toDouble(),
+        'color': (points.first['color'] ?? 'GREEN').toString().toUpperCase(),
+        'timestamp': points.first['timestamp'],
+      });
+
+      for (int i = 1; i < points.length; i++) {
+        final prev = filtered.last;
+        final curr = points[i];
+        
+        final double lat = (curr['lat'] ?? 0.0).toDouble();
+        final double lng = (curr['lng'] ?? 0.0).toDouble();
+        final double prevLat = prev['lat'];
+        final double prevLng = prev['lng'];
+
+        final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, lat, lng);
+        final int timeDiff = ((curr['timestamp'] ?? 0) as int) - (prev['timestamp'] as int);
+
+        // Filter: Outlier jump detection (200m in < 15s)
+        if (timeDiff > 0 && timeDiff < 15000 && d > 200) continue;
+
+        // Filter: Distance-based smoothing (6.0m threshold)
+        if (d < 6.0 && i != points.length - 1 && (curr['color'] ?? 'GREEN').toString().toUpperCase() == prev['color']) {
+           continue;
+        }
+
+        filtered.add({
+          'lat': lat,
+          'lng': lng,
+          'color': (curr['color'] ?? 'GREEN').toString().toUpperCase(),
+          'timestamp': curr['timestamp'],
+        });
+      }
+    }
+
+    // 3. Geometry Simplification per status segment
+    final List<Map<String, dynamic>> processed = [];
+    if (filtered.isNotEmpty) {
+      int start = 0;
+      for (int i = 1; i <= filtered.length; i++) {
+        if (i == filtered.length || filtered[i]['color'] != filtered[start]['color']) {
+          final segment = filtered.sublist(start, i);
+          final simplified = _simplifyPoints(segment, 0.00002);
+          if (processed.isNotEmpty) {
+            processed.addAll(simplified.skip(1));
+          } else {
+            processed.addAll(simplified);
+          }
+          start = i;
+        }
+      }
+    }
+
+    _webSharedRouteData[truckId] = processed;
     _updateWebOverlays();
   }
 
   void _updateSharedRoutePolyline(String truckId, List<Map> points) async {
     if (mapboxMap == null || points.length < 2) return;
 
-    // 1. Strict numerical sort
+    // 1. numerical sort
     points.sort((a, b) => (a['timestamp'] as num).compareTo(b['timestamp'] as num));
 
-    final String sourceId = "admin-route-source-$truckId";
-    final List<Map<String, dynamic>> segments = [];
-
-    // EDGE-BASED SEGMENTATION: Connect points directly to avoid gaps
-    // AND apply smoothing filter for clean roads
-    final List<Map> smoothedPoints = [];
+    // 2. Cleaning & Smoothing
+    final List<Map> filtered = [];
     if (points.isNotEmpty) {
-      smoothedPoints.add(points.first);
+      filtered.add(points.first);
       for (int i = 1; i < points.length; i++) {
-        final prev = smoothedPoints.last;
+        final prev = filtered.last;
         final curr = points[i];
+        
         final double d = geo.Geolocator.distanceBetween(
           (prev['lat'] ?? 0.0).toDouble(), (prev['lng'] ?? 0.0).toDouble(),
           (curr['lat'] ?? 0.0).toDouble(), (curr['lng'] ?? 0.0).toDouble()
         );
-        if (d > 5.0 || i == points.length - 1) smoothedPoints.add(curr);
+        final int timeDiff = ((curr['timestamp'] ?? 0) as int) - ((prev['timestamp'] ?? 0) as int);
+
+        if (timeDiff > 0 && timeDiff < 15000 && d > 200) continue;
+        if (d < 6.0 && i != points.length - 1 && (curr['color'] ?? 'GREEN').toString().toUpperCase() == (prev['color'] ?? 'GREEN').toString().toUpperCase()) {
+           continue;
+        }
+
+        filtered.add(curr);
       }
     }
 
-    for (int i = 1; i < smoothedPoints.length; i++) {
-      final prev = smoothedPoints[i - 1];
-      final curr = smoothedPoints[i];
-      
-      final double prevLng = (prev['lng'] ?? 0.0).toDouble();
-      final double prevLat = (prev['lat'] ?? 0.0).toDouble();
-      final double currLng = (curr['lng'] ?? 0.0).toDouble();
-      final double currLat = (curr['lat'] ?? 0.0).toDouble();
-      final int prevTs = (prev['timestamp'] ?? 0) as int;
-      final int currTs = (curr['timestamp'] ?? 0) as int;
-
-      final String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
-      final bool isGap = (currTs - prevTs) > 60000;
-
-      if (!isGap) {
-        if (segments.isNotEmpty && segments.last['properties']['color'] == color) {
-          final List coords = segments.last['geometry']['coordinates'];
-          if (coords.isEmpty || coords.last[0] != currLng || coords.last[1] != currLat) {
-            coords.add([currLng, currLat]);
+    // 3. Geometry Simplification
+    final List<Map> processed = [];
+    if (filtered.isNotEmpty) {
+      int start = 0;
+      for (int i = 1; i <= filtered.length; i++) {
+        final String currentStatus = (filtered[start]['color'] ?? 'GREEN').toString().toUpperCase();
+        if (i == filtered.length || (filtered[i]['color'] ?? 'GREEN').toString().toUpperCase() != currentStatus) {
+          final segment = filtered.sublist(start, i);
+          final simplified = _simplifyPoints(segment, 0.00002);
+          if (processed.isNotEmpty) {
+            processed.addAll(simplified.skip(1));
+          } else {
+            processed.addAll(simplified);
           }
+          start = i;
+        }
+      }
+    }
+
+    final String sourceId = "admin-route-source-$truckId";
+    final List<Map<String, dynamic>> features = [];
+
+    // 4. Build CONTINUOUS segments sharing transition points
+    if (processed.length >= 2) {
+      for (int i = 1; i < processed.length; i++) {
+        final prev = processed[i - 1];
+        final curr = processed[i];
+        
+        String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
+        if (color == "BLUE") color = "GREEN"; 
+
+        if (features.isNotEmpty && features.last['properties']['color'] == color) {
+          // Append to existing segment of same color
+          final List coords = features.last['geometry']['coordinates'];
+          coords.add([(curr['lng'] ?? 0.0).toDouble(), (curr['lat'] ?? 0.0).toDouble()]);
         } else {
-          segments.add({
+          // Create new segment starting from PREVIOUS point for perfect continuity
+          features.add({
             "type": "Feature",
             "geometry": {
               "type": "LineString",
-              "coordinates": [[prevLng, prevLat], [currLng, currLat]]
+              "coordinates": [
+                [(prev['lng'] ?? 0.0).toDouble(), (prev['lat'] ?? 0.0).toDouble()],
+                [(curr['lng'] ?? 0.0).toDouble(), (curr['lat'] ?? 0.0).toDouble()]
+              ]
             },
-            "properties": {"color": color, "isGap": false}
+            "properties": {"color": color}
           });
         }
       }
     }
 
-    final featureCollection = {"type": "FeatureCollection", "features": segments};
+    final featureCollection = {"type": "FeatureCollection", "features": features};
 
     try {
       final style = mapboxMap!.style;
-      if (!(await style.styleSourceExists(sourceId))) {
+      bool sourceExists = await style.styleSourceExists(sourceId);
+      if (!sourceExists) {
         await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(featureCollection)));
         await style.addLayer(LineLayer(
           id: "admin-route-layer-$truckId",
           sourceId: sourceId,
           lineColor: Colors.green.toARGB32(),
-          lineWidth: 6.0, lineOpacity: 0.9, lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND,
+          lineWidth: 8.0, lineOpacity: 0.85, lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND,
         ));
         await style.setStyleLayerProperty("admin-route-layer-$truckId", "line-color", [
           "match", ["get", "color"], 
-          "GREEN", "#00FF00",
-          "YELLOW", "#FFFF00", 
-          "PINK", "#FF1493", 
-          "BLACK", "#000000",
-          "BLUE", "#0000FF", 
-          "#00FF00"
+          "GREEN", "#4CAF50",
+          "YELLOW", "#FFEB3B", 
+          "PINK", "#E91E63", 
+          "BLACK", "#212121",
+          "#4CAF50"
         ]);
       } else {
         await style.setStyleSourceProperty(sourceId, "data", jsonEncode(featureCollection));
       }
-    } catch (e) {}
+    } catch (e) {
+      debugPrint("[ADMIN ROUTE] Render error for $truckId: $e");
+    }
   }
+
+  List<Map<String, dynamic>> _simplifyPoints(List<Map> points, double epsilon) {
+    if (points.length < 3) return points.map((e) => Map<String, dynamic>.from(e)).toList();
+    int index = -1;
+    double maxDist = 0;
+    for (int i = 1; i < points.length - 1; i++) {
+      double d = _perpendicularDistance(points[i], points.first, points.last);
+      if (d > maxDist) { index = i; maxDist = d; }
+    }
+    if (maxDist > epsilon) {
+      List<Map<String, dynamic>> res1 = _simplifyPoints(points.sublist(0, index + 1), epsilon);
+      List<Map<String, dynamic>> res2 = _simplifyPoints(points.sublist(index), epsilon);
+      return [...res1.sublist(0, res1.length - 1), ...res2];
+    }
+    return [Map<String, dynamic>.from(points.first), Map<String, dynamic>.from(points.last)];
+  }
+
+  double _perpendicularDistance(Map p, Map start, Map end) {
+    double x = (p['lng'] as num).toDouble(); double y = (p['lat'] as num).toDouble();
+    double x1 = (start['lng'] as num).toDouble(); double y1 = (start['lat'] as num).toDouble();
+    double x2 = (end['lng'] as num).toDouble(); double y2 = (end['lat'] as num).toDouble();
+    double dx = x2 - x1; double dy = y2 - y1;
+    if (dx == 0 && dy == 0) return sqrt(pow(x - x1, 2) + pow(y - y1, 2));
+    double t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy);
+    if (t < 0) return sqrt(pow(x - x1, 2) + pow(y - y1, 2));
+    if (t > 1) return sqrt(pow(x - x2, 2) + pow(y - y2, 2));
+    return sqrt(pow(x - (x1 + t * dx), 2) + pow(y - (y1 + t * dy), 2));
+  }
+
 
   void _updateTruckMarkersNative() async {
     if (_pointAnnotationManager == null || _trucks.isEmpty || kIsWeb) return;
@@ -402,7 +511,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
       final offset = _webMarkerPositions[internalId];
       if (offset == null) return const SizedBox.shrink();
       return Positioned(left: offset.dx - 20, top: offset.dy - 40, child: Column(children: [
-        Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(6), boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4)]), child: Text(id, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: Colors.blue))),
+        Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.9), borderRadius: BorderRadius.circular(6), boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4)]), child: Text(id, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: Colors.blue))),
         const Icon(Icons.local_shipping, color: Colors.blue, size: 28),
       ]));
     }));
@@ -560,23 +669,60 @@ class WebPathPainter extends CustomPainter {
     sharedRoutePixels.forEach((truckId, pixels) {
       if (pixels.length < 2) return;
       final data = sharedRouteData[truckId];
-      if (data == null) return;
+      if (data == null || data.length != pixels.length) return;
+
+      Color lastColor = Colors.transparent;
+      Path currentPath = Path();
+      bool pathStarted = false;
+
       for (int i = 0; i < pixels.length - 1; i++) {
         final String colorName = (data[i + 1]['color'] ?? 'GREEN').toString().toUpperCase();
-        Color color = Colors.green;
-        if (colorName == "YELLOW") color = Colors.yellow;
-        if (colorName == "PINK") color = Colors.pinkAccent;
-        if (colorName == "BLACK") color = Colors.black;
-        if (colorName == "GRAY") color = Colors.grey;
-        if (colorName == "BLUE") color = Colors.blue;
-        final paint = Paint()..strokeWidth = 8.0..strokeCap = StrokeCap.round..style = PaintingStyle.stroke..color = color.withOpacity(0.8);
-        canvas.drawLine(pixels[i], pixels[i+1], paint);
+        Color color = const Color(0xFF4CAF50); // Material Green
+        if (colorName == "YELLOW") color = const Color(0xFFFFEB3B); // Material Yellow
+        else if (colorName == "PINK") color = const Color(0xFFE91E63); // Material Pink
+        else if (colorName == "BLACK") color = const Color(0xFF212121); // Dark Grey
+        else if (colorName == "BLUE") color = const Color(0xFF2196F3); // Material Blue
+        
+        if (color != lastColor) {
+          // Finish previous colored path and start a new one from the SAME transition point
+          if (pathStarted) {
+            final paint = Paint()
+              ..strokeWidth = 8.0
+              ..strokeCap = StrokeCap.round
+              ..strokeJoin = StrokeJoin.round
+              ..style = PaintingStyle.stroke
+              ..color = lastColor.withValues(alpha: 0.85);
+            canvas.drawPath(currentPath, paint);
+          }
+          currentPath = Path();
+          currentPath.moveTo(pixels[i].dx, pixels[i].dy); // Start at previous end
+          currentPath.lineTo(pixels[i+1].dx, pixels[i+1].dy);
+          lastColor = color;
+          pathStarted = true;
+        } else {
+          if (!pathStarted) {
+            currentPath.moveTo(pixels[i].dx, pixels[i].dy);
+            pathStarted = true;
+            lastColor = color;
+          }
+          currentPath.lineTo(pixels[i+1].dx, pixels[i+1].dy);
+        }
+      }
+      
+      if (pathStarted) {
+        final paint = Paint()
+          ..strokeWidth = 8.0
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..style = PaintingStyle.stroke
+          ..color = lastColor.withValues(alpha: 0.85);
+        canvas.drawPath(currentPath, paint);
       }
     });
 
     optimizedPixels.forEach((truckId, pixels) {
       if (pixels.length < 2) return;
-      final paint = Paint()..color = Colors.blue.withOpacity(0.5)..strokeWidth = 8.0..strokeCap = StrokeCap.round..style = PaintingStyle.stroke;
+      final paint = Paint()..color = Colors.blue.withValues(alpha: 0.5)..strokeWidth = 8.0..strokeCap = StrokeCap.round..style = PaintingStyle.stroke;
       final path = Path(); path.moveTo(pixels[0].dx, pixels[0].dy);
       for (int i = 1; i < pixels.length; i++) path.lineTo(pixels[i].dx, pixels[i].dy);
       canvas.drawPath(path, paint);
