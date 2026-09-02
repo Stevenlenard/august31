@@ -565,7 +565,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     setState(() => _isNavigating = true);
 
     try {
-      final currentTruckId = _user?.preferredTruck ?? "GT-001";
+      final currentTruckId = _user?.preferredTruck ?? "Unknown";
       final idCtrl = TextEditingController(text: currentTruckId);
       final plateCtrl = TextEditingController(text: _truckPlateNumber ?? "");
 
@@ -577,13 +577,40 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
       ], "SAVE CHANGES", () async {
         final newTruckId = idCtrl.text.trim();
         final newPlate = plateCtrl.text.trim();
+        final currentTruckId = _user?.preferredTruck ?? "Unknown";
 
         if (newTruckId.isEmpty || newPlate.isEmpty) {
           return false;
         }
 
         try {
-          // 1. Update the truck document (Metadata) - AUTHORITATIVE
+          // 1. If Truck ID changed, handle the handover
+          if (newTruckId != currentTruckId) {
+            // A. Mark old location entry as OFFLINE
+            await _database.ref('truck_locations/$currentTruckId').update({
+              'isOnline': false,
+              'status': 'OFFLINE',
+              'lastSeen': ServerValue.timestamp,
+            });
+
+            // B. If there's an active session, migrate it to the new Truck ID
+            if (widget.currentSessionId != null) {
+              await _database.ref('driver_routes/${widget.currentSessionId}').update({
+                'truck_id': newTruckId,
+              });
+              // Prepare the new location entry with the session ID
+              await _database.ref('truck_locations/$newTruckId').update({
+                'current_session': widget.currentSessionId,
+                'driver_id': _user?.userId,
+                'driver_name': _user?.name,
+                'plate_number': newPlate,
+                'isOnline': true,
+                'status': 'ACTIVE',
+              });
+            }
+          }
+
+          // 2. Update/Create the truck document (Metadata) - AUTHORITATIVE
           await _database.ref('trucks/$newTruckId').update({
             'truckId': newTruckId,
             'plateNumber': newPlate,
@@ -591,15 +618,21 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             'updatedAt': ServerValue.timestamp,
           });
 
-          // 2. Update Firebase user node (Triggers real-time sync across all screens)
+          // 3. Update the live location node with the new plate number too
+          await _database.ref('truck_locations/$newTruckId').update({
+            'plate_number': newPlate,
+            'truck_id': newTruckId,
+          });
+
+          // 4. Update Firebase user node (Triggers real-time sync across all screens)
           await _database.ref('users/${_user!.userId}').update({
             'preferred_truck': newTruckId,
             'lastUpdated': ServerValue.timestamp,
           });
 
-          debugPrint("[TRUCK_SAVE] Firebase updates succeeded for $newTruckId");
+          debugPrint("[TRUCK_SYNC] Authoritative updates succeeded for $newTruckId");
 
-          // 3. Update SQL backend (Non-blocking sync)
+          // 5. Update SQL backend (Non-blocking sync)
           try {
             final response = await _apiService.updateProfile(
               userId: _user!.userId,
@@ -614,19 +647,15 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             if (response.data['success'] == true) {
               final updatedUser = _user!.copyWith(preferredTruck: newTruckId);
               await SessionManager.saveUser(updatedUser.toJson());
-              debugPrint("[TRUCK_SAVE] SQL Backend sync succeeded");
-            } else {
-              debugPrint("[TRUCK_SAVE] SQL Backend reported failure: ${response.data['message']}");
             }
           } catch (e) {
-            // Log but don't fail the whole operation if Firebase worked
-            debugPrint("[TRUCK_SAVE] SQL Backend communication error (ignored): $e");
+            debugPrint("[TRUCK_SYNC] SQL Backend sync error (ignored): $e");
           }
           
-          return true; // We return true because the authoritative Firebase update worked
+          return true; 
         } catch (e) {
-          debugPrint("[TRUCK_SAVE] Authoritative Firebase update failed: $e");
-          rethrow; // This will trigger the Error Dialog in _showModal
+          debugPrint("[TRUCK_SYNC] Authoritative update failed: $e");
+          rethrow;
         }
       });
     } finally {
@@ -687,7 +716,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     setState(() => _isNavigating = true);
 
     try {
-      final truckId = _user?.preferredTruck ?? "GT-001";
+      final truckId = _user?.preferredTruck ?? "Unknown";
       await _initializeMaintenanceIfNeeded(truckId);
 
       if (!context.mounted) return;
@@ -918,7 +947,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
             debugPrint("GPS Timeout during report: $e");
           }
 
-          final truckId = _user?.preferredTruck ?? "GT-001";
+          final truckId = _user?.preferredTruck ?? "Unknown";
           final newIssueRef = _database.ref('truck_issues').push();
           final String issueId = newIssueRef.key ?? '';
           
@@ -1509,7 +1538,7 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     setState(() => _isNavigating = true);
 
     try {
-      final truckId = _user?.preferredTruck ?? "GT-001";
+      final truckId = _user?.preferredTruck ?? "Unknown";
       _showModal("Performance Stats", [
         StreamBuilder<DatabaseEvent>(
           stream: _database.ref('truck_locations/$truckId').onValue,

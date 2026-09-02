@@ -116,19 +116,56 @@ class _AdminDashboardState extends State<AdminDashboard> {
       if (event.snapshot.exists && event.snapshot.value != null) {
         final Map? data = event.snapshot.value as Map?;
         if (data == null) return;
-        final List<Map<dynamic, dynamic>> trucks = [];
-        double totalSpeed = 0.0;
-        int activeWithSpeed = 0;
+        
+        final Map<String, Map<dynamic, dynamic>> driverToLatestTruck = {};
+        
         data.forEach((key, value) {
           if (value != null) {
             final truckMap = Map<dynamic, dynamic>.from(value as Map);
-            trucks.add(truckMap);
-            if (truckMap['isOnline'] == true) {
-              final speed = double.tryParse(truckMap['speed']?.toString() ?? '0') ?? 0.0;
-              if (speed > 0) { totalSpeed += speed; activeWithSpeed++; }
+            final String nodeKey = key.toString();
+            final String? dId = truckMap['driver_id']?.toString();
+            
+            truckMap['internal_id'] = nodeKey;
+            if (truckMap['truck_id'] == null) {
+              truckMap['truck_id'] = nodeKey;
+            }
+
+            if (dId == null) {
+              driverToLatestTruck["node_$nodeKey"] = truckMap;
+            } else {
+              if (!driverToLatestTruck.containsKey(dId)) {
+                driverToLatestTruck[dId] = truckMap;
+              } else {
+                final existing = driverToLatestTruck[dId]!;
+                final bool existingOnline = existing['isOnline'] == true;
+                final bool currentOnline = truckMap['isOnline'] == true;
+                final int existingSeen = (existing['lastSeen'] ?? 0) as int;
+                final int currentSeen = (truckMap['lastSeen'] ?? 0) as int;
+                
+                if (currentOnline && !existingOnline) {
+                  driverToLatestTruck[dId] = truckMap;
+                } else if (currentOnline == existingOnline && currentSeen > existingSeen) {
+                  driverToLatestTruck[dId] = truckMap;
+                }
+              }
             }
           }
         });
+
+        final List<Map<dynamic, dynamic>> trucks = driverToLatestTruck.values.toList();
+        double totalSpeed = 0.0;
+        int activeWithSpeed = 0;
+
+        for (var t in trucks) {
+          if (t['isOnline'] == true) {
+            final speed = double.tryParse(t['speed']?.toString() ?? '0') ?? 0.0;
+            if (speed > 0) {
+              totalSpeed += speed;
+              activeWithSpeed++;
+            }
+          }
+        }
+
         if (mounted) {
           setState(() {
             _activeTrucks = trucks.where((t) => t['isOnline'] == true).length;
@@ -497,7 +534,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   Widget _buildModernFleetItem(Map<dynamic, dynamic> truck) {
-    final String id = (truck['truck_id'] ?? "GT-001").toString();
+    // Priority: explicit truck_id, then fallback to node key
+    final String id = (truck['truck_id'] ?? truck['internal_id'] ?? "Unknown").toString();
     final String status = (truck['status'] ?? "Idle").toString().toUpperCase();
     final Color statusColor = status == 'ACTIVE' ? const Color(0xFF4CAF50) : const Color(0xFFFFAB00);
     return Container(

@@ -19,7 +19,7 @@ class DriverTrackTruckScreen extends StatefulWidget {
   final String? focusTruckId;
   final geo.Position? manualPosition;
   final bool isSimulation;
-  final List<Map>? testRoute; // NEW: For web testing
+  final List<Map>? testRoute; 
   
   const DriverTrackTruckScreen({
     super.key, 
@@ -42,7 +42,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   UserData? _user;
   
   PointAnnotationManager? _pointAnnotationManager;
-  CircleAnnotationManager? _circleAnnotationManager;
   
   final Map<String, PointAnnotation> _truckMarkers = {};
   List<Map> _lastPoints = [];
@@ -61,15 +60,13 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   bool _routeSourceCreated = false;
   bool _specialMarkersCreated = false;
   
-  // LIVE DRIVER MARKERS (Annotations)
-  CircleAnnotation? _liveDriverCircle;
-  CircleAnnotation? _liveDriverHalo;
+  // LIVE DRIVER MARKERS
   PointAnnotation? _liveDriverLabel;
 
-  // NEW: Session Meta Persistence
+  // Session Meta Persistence
   Map? _lastSessionData;
 
-  // NEW: Follow Mode State
+  // Follow Mode State
   bool _isFollowLocked = true;
   String _currentStatus = "ACTIVE";
   String? _truckPlateNumber;
@@ -77,7 +74,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
   // Modal Info State
   String _startTime = "--:--";
-  DateTime? _startDateTime;
   double _distance = 0.0;
   double _currentSpeed = 0.0;
   String _currentTime = "";
@@ -134,7 +130,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
   void _listenToTruckMeta() {
     _truckMetaSubscription?.cancel();
-    final String tid = (widget.focusTruckId ?? "GT-001").toUpperCase();
+    final String tid = (widget.focusTruckId ?? "Unknown").toUpperCase();
     
     _truckMetaSubscription = _database.ref('trucks/$tid').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
@@ -170,10 +166,12 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
     try {
       geo.Position pos = await geo.Geolocator.getCurrentPosition(desiredAccuracy: geo.LocationAccuracy.high);
-      if (mounted) setState(() { 
-        _lastLocalPos = pos;
-        _currentSpeed = pos.speed * 3.6; // Convert m/s to km/h
-      });
+      if (mounted) {
+        setState(() { 
+          _lastLocalPos = pos;
+          _currentSpeed = pos.speed * 3.6; 
+        });
+      }
       _updateLocalDriverMarker(pos);
     } catch (e) {}
 
@@ -181,10 +179,12 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       locationSettings: const geo.LocationSettings(accuracy: geo.LocationAccuracy.bestForNavigation, distanceFilter: 1),
     ).listen((pos) {
       if (widget.isSimulation) return;
-      if (mounted) setState(() { 
-        _lastLocalPos = pos;
-        _currentSpeed = pos.speed * 3.6; // Convert m/s to km/h
-      });
+      if (mounted) {
+        setState(() { 
+          _lastLocalPos = pos;
+          _currentSpeed = pos.speed * 3.6;
+        });
+      }
       _updateLocalDriverMarker(pos);
     });
   }
@@ -195,7 +195,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       if (event.snapshot.exists && event.snapshot.value != null) {
         _lastTruckData = event.snapshot.value as Map;
         
-        final String tid = (widget.focusTruckId ?? "GT-001").toUpperCase();
+        final String tid = (widget.focusTruckId ?? "Unknown").toUpperCase();
         if (_lastTruckData!.containsKey(tid)) {
           final myData = _lastTruckData![tid] as Map;
           final String newStatus = (myData['status'] ?? "ACTIVE").toString().toUpperCase();
@@ -218,12 +218,11 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     if (widget.currentSessionId == null) return;
     _routeSubscription?.cancel();
     _routeSubscription = _database.ref('driver_routes/${widget.currentSessionId}').onValue.listen((event) {
-      if (widget.testRoute != null) return; // Skip if test route is active
+      if (widget.testRoute != null) return; 
       if (event.snapshot.exists && event.snapshot.value != null) {
         final Map data = event.snapshot.value as Map;
         _lastSessionData = data;
 
-        // Update modal info
         if (mounted) {
           setState(() {
             if (data['start_time'] != null) _startTime = data['start_time'];
@@ -240,11 +239,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           final List<Map> points = [];
           routeData.forEach((key, value) => points.add(value as Map));
           
-          points.sort((a, b) {
-            final num tsA = a['timestamp'] ?? 0;
-            final num tsB = b['timestamp'] ?? 0;
-            return tsA.compareTo(tsB);
-          });
+          points.sort((a, b) => (a['timestamp'] ?? 0).compareTo(b['timestamp'] ?? 0));
           
           if (mounted && points.isNotEmpty) {
             if (points.length != _lastPoints.length) {
@@ -282,8 +277,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   void _onMapCreated(MapboxMap map) { mapboxMap = map; }
 
   void _onStyleLoaded(dynamic data) async {
-    debugPrint("[DRIVER MAP] Style loaded. Initializing layers...");
-    
     _driverSourceCreated = false;
     _routeSourceCreated = false;
     _specialMarkersCreated = false;
@@ -295,13 +288,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     try {
       await Future.delayed(const Duration(milliseconds: 800));
       _pointAnnotationManager = await mapboxMap!.annotations.createPointAnnotationManager();
-      _circleAnnotationManager = await mapboxMap!.annotations.createCircleAnnotationManager();
     } catch (e) {}
     if (!mounted) return;
     _truckMarkers.clear();
     
-    _liveDriverCircle = null;
-    _liveDriverHalo = null;
     _liveDriverLabel = null;
 
     setState(() => _managersReady = true);
@@ -316,7 +306,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     if (mapboxMap == null) return;
 
     final String sourceId = "driver-live-location-source";
-    final tid = (widget.focusTruckId ?? "GT-001").toUpperCase();
+      final tid = (widget.focusTruckId ?? "Unknown").toUpperCase();
     
     final geojson = {
       "type": "FeatureCollection",
@@ -338,7 +328,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(geojson)));
         }
 
-        // 1. HALO (Status Indicator)
         if (!(await style.styleLayerExists("driver-live-location-halo"))) {
           await style.addLayer(CircleLayer(
             id: "driver-live-location-halo", 
@@ -350,7 +339,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           ));
         }
 
-        // 2. CENTER CIRCLE
         if (!(await style.styleLayerExists("driver-live-location-circle"))) {
           await style.addLayer(CircleLayer(
             id: "driver-live-location-circle", 
@@ -363,12 +351,11 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           ));
         }
 
-        // 3. LABEL
         if (!(await style.styleLayerExists("driver-live-location-label"))) {
           await style.addLayer(SymbolLayer(
             id: "driver-live-location-label", 
             sourceId: sourceId, 
-            textField: "DRIVER\n$tid", 
+            textField: "DRIVER\n$tid",
             textSize: 14.0, 
             textColor: Colors.green.toARGB32(), 
             textHaloColor: Colors.white.toARGB32(), 
@@ -392,23 +379,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         await style.setStyleLayerProperty("driver-live-location-halo", "circle-stroke-color", statusColorExpression);
 
         if (mounted) setState(() => _driverSourceCreated = true);
-        debugPrint("[DRIVER MARKER] Source and Layers established at: ${pos.latitude}, ${pos.longitude}");
       } else {
-        // FAST DATA UPDATE
         await style.setStyleSourceProperty(sourceId, "data", jsonEncode(geojson));
       }
-    } catch (e) {
-      debugPrint("[DRIVER MARKER] Style Update Error: $e");
-    }
-  }
-
-  int _getStatusHaloColorInt() {
-     switch(_currentStatus) {
-       case "IDLE": return Colors.yellow.toARGB32();
-       case "FULL": return Colors.pinkAccent.toARGB32();
-       case "FINISHED": return Colors.black.toARGB32();
-       default: return Colors.green.toARGB32();
-     }
+    } catch (e) {}
   }
 
   void _updateSpecialMarkers(Map data) async {
@@ -448,7 +422,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
             circleSortKey: 3000.0,
           ));
           await style.setStyleLayerProperty("driver-special-circles", "circle-color", 
-            ["match", ["get", "type"], "START", "#2196F3", "#000000"] // Blue for START, Black for FINISH
+            ["match", ["get", "type"], "START", "#2196F3", "#000000"] 
           );
         }
         if (!(await style.styleLayerExists("driver-special-labels"))) {
@@ -465,15 +439,13 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       } else {
         await style.setStyleSourceProperty(sourceId, "data", jsonEncode(geojson));
       }
-    } catch (e) {
-      debugPrint("[SPECIAL MARKERS] Update Error: $e");
-    }
+    } catch (e) {}
   }
 
   void _updateSingleTruckMarker(String id, Map data) {
     if (!_managersReady || _pointAnnotationManager == null) return;
     final String truckId = (data['truck_id'] ?? id).toString().toUpperCase();
-    final String targetId = (widget.focusTruckId ?? "GT-001").toUpperCase();
+    final String targetId = (widget.focusTruckId ?? "Unknown").toUpperCase();
     if (truckId == targetId) return; 
 
     final double lat = (data['latitude'] ?? 0.0).toDouble();
@@ -498,10 +470,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       return;
     }
 
-    // 1. Prepare points including Start Point and LIVE position
     final List<Map> allPoints = [];
-    
-    // A. Add Start Point from Session Meta
     if (_lastSessionData != null && _lastSessionData!['start_lat'] != null) {
       allPoints.add({
         'lat': _lastSessionData!['start_lat'],
@@ -512,10 +481,8 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       });
     }
 
-    // B. Add all recorded points
     allPoints.addAll(points);
 
-    // C. Add Live Position (ensures line always reaches the driver marker)
     if (_lastLocalPos != null) {
       allPoints.add({
         'lat': _lastLocalPos!.latitude,
@@ -526,10 +493,8 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       });
     }
 
-    // D. Sort everything by timestamp to ensure correct sequence
     allPoints.sort((a, b) => (a['timestamp'] as num).compareTo(b['timestamp'] as num));
 
-    // 2. EDGE-BASED CLEANING & SMOOTHING
     final List<Map> filtered = [];
     if (allPoints.isNotEmpty) {
       filtered.add(allPoints.first);
@@ -544,33 +509,28 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
         final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, lat, lng);
         final int timeDiff = (curr['timestamp'] as int) - (prev['timestamp'] as int);
+        final double speedKmH = (curr['speed'] ?? 0.0).toDouble() * 3.6;
 
-        // FILTER: Outlier jump detection (Speed check)
-        // Ignore jumps over 150m in less than 10 seconds (likely GPS error)
-        if (timeDiff > 0 && timeDiff < 10000 && d > 150) {
-           debugPrint("[GPS CLEANER] Filtered outlier jump: ${d.toStringAsFixed(1)}m");
-           continue;
-        }
+        // 1. FILTER: Outlier jump detection (Speed check)
+        if (timeDiff > 0 && timeDiff < 10000 && d > 150) continue;
 
-        // FILTER: Distance-based jitter reduction
-        // ignore points that haven't moved enough (5.0m threshold) UNLESS status changed
-        if (d < 5.0 && i != allPoints.length - 1 && prev['status'] == curr['status']) {
-           continue;
-        }
+        // 2. FILTER: Jitter reduction (Speed + Distance)
+        bool isStationary = speedKmH < 2.0;
+        double threshold = isStationary ? 8.0 : 4.0;
+        if (d < threshold && i != allPoints.length - 1 && prev['status'] == curr['status']) continue;
 
         filtered.add(curr);
       }
     }
 
-    // 3. Geometry Simplification (Douglas-Peucker) per status segment
     final List<Map> processed = [];
     if (filtered.isNotEmpty) {
       int start = 0;
       for (int i = 1; i <= filtered.length; i++) {
         if (i == filtered.length || filtered[i]['status'] != filtered[start]['status']) {
           final segment = filtered.sublist(start, i);
-          // Epsilon 0.00002 (~2.2 meters) removes small jitter while keeping road turns accurate.
-          final simplified = _simplifyPoints(segment, 0.00002);
+          // Epsilon 0.00004 (~4.5 meters) helps snap shaky trails into clean straight lines
+          final simplified = _simplifyPoints(segment, 0.00004);
           if (processed.isNotEmpty) {
             processed.addAll(simplified.skip(1));
           } else {
@@ -581,7 +541,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       }
     }
 
-    // 4. Group into status-colored connected paths (GeoJSON)
     final String sourceId = "driver-route-source";
     final List<Map<String, dynamic>> features = [];
 
@@ -640,9 +599,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       } else { 
         await style.setStyleSourceProperty(sourceId, "data", jsonEncode(featureCollection)); 
       }
-    } catch (e) {
-      debugPrint("[ROUTE LINE] Update Error: $e");
-    }
+    } catch (e) {}
   }
 
   List<Map> _simplifyPoints(List<Map> points, double epsilon) {
@@ -704,7 +661,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
             if (!widget.isEmbedded) _buildLegend(),
             _buildMapControls(),
             
-            // Swipe-up Modal (Only show if NOT embedded)
             if (!widget.isEmbedded)
               Positioned.fill(
                 child: DraggableScrollableSheet(
@@ -768,13 +724,12 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         ),
         const SizedBox(height: 24),
         
-        // Trip Information Card
         _buildInfoCard(
           title: "Trip Information",
           icon: Icons.info_outline_rounded,
           color: AppColors.tealText,
           content: [
-            _buildInfoRow("Truck Number", _user?.preferredTruck ?? "GT-001", color: AppColors.tealText),
+            _buildInfoRow("Truck Number", _user?.preferredTruck ?? "Unknown", color: AppColors.tealText),
             const Divider(height: 24),
             _buildInfoRow("Plate Number", _truckPlateNumber ?? "N/A", isBold: true),
             const Divider(height: 24),
@@ -786,11 +741,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         
         const SizedBox(height: 20),
         
-        // GPS Status Card
         _buildInfoCard(
           title: "GPS Status",
           icon: Icons.gps_fixed_rounded,
-          color: Colors.green, // Changed to Green
+          color: Colors.green, 
           content: [
             _buildGpsSignalRow(),
             const Divider(height: 24),
@@ -810,9 +764,9 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       margin: const EdgeInsets.symmetric(horizontal: 20),
       padding: const EdgeInsets.all(28),
       decoration: BoxDecoration(
-        color: Colors.white, // Changed to White
+        color: Colors.white, 
         borderRadius: BorderRadius.circular(32),
-        boxShadow: AppTheme.pulidongShadow, // Changed to pulidongShadow
+        boxShadow: AppTheme.pulidongShadow, 
         border: Border.all(color: Colors.grey.shade100, width: 1),
       ),
       child: Column(
@@ -858,7 +812,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
             color: Colors.green.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(20), // Oval
+            borderRadius: BorderRadius.circular(20), 
             border: Border.all(color: Colors.green.withValues(alpha: 0.2)),
           ),
           child: Row(
@@ -876,12 +830,11 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
   Widget _buildMapControls() {
     return Positioned(
-      bottom: widget.isEmbedded ? 20 : 160, // Sits above the minimized modal
+      bottom: widget.isEmbedded ? 20 : 160, 
       right: 20,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // FOLLOW TOGGLE (TARGET ICON)
           _HoverZoomLink(
             onTap: () {
               setState(() => _isFollowLocked = !_isFollowLocked);
@@ -904,7 +857,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          // RECENTER (MAP ICON)
           _HoverZoomLink(
             onTap: () {
               mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(121.1623, 13.9413)), zoom: 14.5));
@@ -925,7 +877,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   }
 
   Widget _buildFloatingHeader() {
-    // Only show the large floating header if NOT embedded
     if (widget.isEmbedded) return const SizedBox.shrink();
 
     return Positioned(
@@ -1009,15 +960,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         ),
       ),
     );
-  }
-
-  Color _getStatusColor(String status) {
-    switch (status) {
-      case "IDLE": return Colors.yellow;
-      case "FULL": return Colors.pinkAccent;
-      case "FINISHED": return Colors.blue;
-      default: return Colors.greenAccent;
-    }
   }
 }
 

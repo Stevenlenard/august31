@@ -28,18 +28,20 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
 
   final Map<String, StreamSubscription> _sharedRouteSubscriptions = {};
   final Map<String, String> _truckPlates = {}; // Cache for plate numbers
+  final Map<String, String> _driverCurrentTrucks = {}; // driverId -> truckId
   StreamSubscription? _trucksMetaSubscription;
+  StreamSubscription? _usersSubscription;
 
   final Map<String, List<Map<String, dynamic>>> _webSharedRouteData = {}; 
-  Map<String, List<Offset>> _webSharedRoutePixels = {}; 
-  Map<String, Offset> _webStartPositions = {};
+  final Map<String, List<Offset>> _webSharedRoutePixels = {}; 
+  final Map<String, Offset> _webStartPositions = {};
   final Map<String, List<Map<dynamic, dynamic>>> _lastRoutePoints = {}; 
   final Set<String> _visiblePaths = {};
   final Map<String, Position?> _sessionStartPoints = {};
 
   final Map<String, List<Map<String, dynamic>>> _webHeatmapData = {}; 
-  Map<String, List<Offset>> _webHeatmapPixels = {}; 
-  Map<String, List<Offset>> _webOptimizedPixels = {};
+  final Map<String, List<Offset>> _webHeatmapPixels = {}; 
+  final Map<String, List<Offset>> _webOptimizedPixels = {};
 
   // For Web Marker UI
   Map<String, Offset> _webMarkerPositions = {};
@@ -49,6 +51,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
     super.initState();
     _listenToTrucks();
     _listenToTruckMeta();
+    _listenToUsers();
   }
 
   @override
@@ -57,6 +60,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
       sub.cancel();
     }
     _trucksMetaSubscription?.cancel();
+    _usersSubscription?.cancel();
     super.dispose();
   }
 
@@ -78,19 +82,92 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
     });
   }
 
+  void _listenToUsers() {
+    _usersSubscription?.cancel();
+    _usersSubscription = _database.ref('users').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        final Map data = event.snapshot.value as Map;
+        final Map<String, String> currentAssignments = {};
+        data.forEach((key, value) {
+          if (value is Map && value['role'] == 'driver') {
+            final String? truckId = value['preferred_truck']?.toString();
+            if (truckId != null) {
+              currentAssignments[key.toString()] = truckId;
+            }
+          }
+        });
+        if (mounted) {
+          setState(() {
+            _driverCurrentTrucks.clear();
+            _driverCurrentTrucks.addAll(currentAssignments);
+          });
+        }
+      }
+    });
+  }
+
   void _listenToTrucks() {
     _database.ref('truck_locations').onValue.listen((event) {
       if (event.snapshot.exists) {
         final Map data = event.snapshot.value as Map;
-        final List<Map<dynamic, dynamic>> list = [];
+        
+        // DEDUPLICATION LOGIC: One current record per Driver
+        final Map<String, Map<dynamic, dynamic>> driverToLatestTruck = {};
+
         data.forEach((key, value) {
           final truckMap = Map<dynamic, dynamic>.from(value as Map);
-          truckMap['internal_id'] = key.toString(); 
-          if (truckMap['truck_id'] == null) {
-            truckMap['truck_id'] = key.toString();
+          final String nodeKey = key.toString();
+          final String? dId = truckMap['driver_id']?.toString();
+          
+          if (dId == null) {
+            // If no driver ID, treat node key as unique identifier (fallback)
+            truckMap['internal_id'] = nodeKey;
+            if (truckMap['truck_id'] == null) {
+              truckMap['truck_id'] = nodeKey;
+            }
+            driverToLatestTruck["node_$nodeKey"] = truckMap;
+            return;
           }
-          list.add(truckMap);
+
+          truckMap['internal_id'] = nodeKey;
+          if (truckMap['truck_id'] == null) {
+            truckMap['truck_id'] = nodeKey;
+          }
+
+          if (!driverToLatestTruck.containsKey(dId)) {
+            driverToLatestTruck[dId] = truckMap;
+          } else {
+            // Determine which record is more current
+            final existing = driverToLatestTruck[dId]!;
+            final bool existingOnline = existing['isOnline'] == true;
+            final bool currentOnline = truckMap['isOnline'] == true;
+            
+            final int existingSeen = (existing['lastSeen'] ?? 0) as int;
+            final int currentSeen = (truckMap['lastSeen'] ?? 0) as int;
+
+            // Priority: 
+            // 1. Match driver's current assigned truck
+            // 2. isOnline
+            // 3. latest lastSeen
+            
+            final String? assignedTruck = _driverCurrentTrucks[dId];
+            final bool existingMatches = existing['truck_id'] == assignedTruck;
+            final bool currentMatches = truckMap['truck_id'] == assignedTruck;
+
+            if (currentMatches && !existingMatches) {
+              driverToLatestTruck[dId] = truckMap;
+            } else if (existingMatches && !currentMatches) {
+              // keep existing
+            } else if (currentOnline && !existingOnline) {
+              driverToLatestTruck[dId] = truckMap;
+            } else if (currentOnline == existingOnline && currentSeen > existingSeen) {
+              driverToLatestTruck[dId] = truckMap;
+            }
+          }
         });
+
+        final List<Map<dynamic, dynamic>> list = driverToLatestTruck.values.toList();
+
         if (mounted) {
           setState(() {
             _trucks = list;
@@ -103,7 +180,10 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
 
           // Auto-follow logic
           if (_followedTruckId != null) {
-            final t = list.firstWhere((element) => element['internal_id'] == _followedTruckId || element['truck_id'] == _followedTruckId, orElse: () => {});
+            final t = list.firstWhere(
+              (element) => element['internal_id'] == _followedTruckId || element['truck_id'] == _followedTruckId, 
+              orElse: () => {}
+            );
             if (t.isNotEmpty) {
               final double lat = (t['latitude'] ?? 0.0).toDouble();
               final double lng = (t['longitude'] ?? 0.0).toDouble();
@@ -205,10 +285,14 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
     if (mounted) {
       setState(() { 
         _webMarkerPositions = newMarkerPositions; 
-        _webStartPositions = newStartPositions;
-        _webHeatmapPixels = newHeatmapPixels; 
-        _webSharedRoutePixels = newSharedPixels;
-        _webOptimizedPixels = newOptimizedPixels; 
+        _webStartPositions.clear();
+        _webStartPositions.addAll(newStartPositions);
+        _webHeatmapPixels.clear();
+        _webHeatmapPixels.addAll(newHeatmapPixels); 
+        _webSharedRoutePixels.clear();
+        _webSharedRoutePixels.addAll(newSharedPixels);
+        _webOptimizedPixels.clear();
+        _webOptimizedPixels.addAll(newOptimizedPixels);
       });
     }
   }
@@ -809,14 +893,17 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
   }
 
   Widget _buildDetailedTruckCard(Map<dynamic, dynamic> truck) {
-    // Priority: 1. explicit truck_id field, 2. internal_id (node key), 3. Unknown
-    final String id = (truck['truck_id'] ?? truck['internal_id'] ?? "Unknown").toString();
+    final String driverId = truck['driver_id']?.toString() ?? "";
+    final String assignedTruckId = _driverCurrentTrucks[driverId] ?? truck['truck_id'] ?? truck['internal_id'] ?? "Unknown";
+    
+    // The ID we display should be the one CURRENTLY assigned to the driver
+    final String id = assignedTruckId;
     final String internalId = (truck['internal_id'] ?? id).toString();
     
     final String status = (truck['status'] ?? "Idle").toString().toUpperCase();
     final String driver = (truck['driver_name'] ?? truck['driverName'] ?? "Unknown Driver").toString();
     
-    // Resolve plate number from metadata cache first, then live node, then fallback
+    // Resolve plate number from metadata cache using the AUTHORITATIVE ID
     final String plateNumber = _truckPlates[id.toUpperCase()] ?? 
                          (truck['plate_number'] ?? truck['plateNumber'] ?? "N/A").toString();
 

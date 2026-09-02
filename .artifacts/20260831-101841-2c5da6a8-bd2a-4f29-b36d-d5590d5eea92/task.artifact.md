@@ -1,13 +1,13 @@
 # Tasks
 
 - [x] Research existing route and assignment data structures
-- [/] Implement "Routes Completed" logic fix
-	- [ ] Refactor `_recalculateRoutesMetrics` in `AnalyticsScreen`
-	- [ ] Implement `_calculateMetricsInRange` helper
-	- [ ] Implement `_getPreviousPeriod` helper
-	- [ ] Add debug logging
-- [ ] Verify implementation
-	- [ ] Test with single date
-	- [ ] Test with date range
-	- [ ] Test with area filter
-	- [ ] Verify trend calculation
+- [x] Implement "Routes Completed" logic fix
+	- [x] Refactor `_recalculateRoutesMetrics` in `AnalyticsScreen`
+	- [x] Implement `_calculateMetricsInRange` helper
+	- [x] Implement `_getPreviousPeriod` helper
+	- [x] Add debug logging
+- [x] Verify implementation
+	- [x] Test with single date
+	- [x] Test with date range
+	- [x] Test with area filter
+	- [x] Verify trend calculation
