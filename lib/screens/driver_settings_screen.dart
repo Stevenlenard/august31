@@ -2212,6 +2212,18 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> {
     if (confirmed) {
       if (!mounted) return;
       final navigator = Navigator.of(context);
+      
+      // Update Firebase before local logout to ensure live tracking reflects offline status
+      final user = await SessionManager.getUser();
+      if (user != null && user.preferredTruck != null) {
+        debugPrint("[LIFECYCLE] SETTING OFFLINE STATUS VIA SETTINGS LOGOUT");
+        await FirebaseDatabase.instance.ref('truck_locations/${user.preferredTruck}').update({
+          'status': 'OFFLINE',
+          'isOnline': false,
+          'lastSeen': ServerValue.timestamp
+        });
+      }
+
       await SessionManager.logout();
       if (mounted) {
         navigator.pushReplacementNamed('/');

@@ -46,6 +46,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   final Map<String, PointAnnotation> _truckMarkers = {};
   List<Map> _lastPoints = [];
   StreamSubscription? _truckSubscription;
+  StreamSubscription? _userSubscription;
   StreamSubscription? _routeSubscription;
   StreamSubscription? _routeMetaSubscription;
   StreamSubscription? _localGpsSubscription;
@@ -95,7 +96,35 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
   void _loadUser() async {
     _user = await SessionManager.getUser();
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {});
+      _listenToTruckMeta();
+    }
+    _setupUserListener();
+  }
+
+  void _setupUserListener() {
+    if (_user == null) return;
+    _userSubscription?.cancel();
+    _userSubscription = _database.ref('users/${_user!.userId}').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        final Map data = event.snapshot.value as Map;
+        if (mounted) {
+          setState(() {
+            final Map<String, dynamic> currentData = _user!.toJson();
+            data.forEach((k, v) => currentData[k] = v);
+            _user = UserData.fromJson(currentData);
+          });
+          _listenToTruckMeta(); // Refresh plate number if assignment changed
+          if (_lastLocalPos != null) _updateLocalDriverMarker(_lastLocalPos!);
+          
+          // Refresh other truck markers with the new user context
+          if (_managersReady && _lastTruckData != null) {
+            _lastTruckData!.forEach((k, v) => _updateSingleTruckMarker(k.toString(), v as Map));
+          }
+        }
+      }
+    });
   }
 
   void _startClock() {
@@ -130,7 +159,8 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
   void _listenToTruckMeta() {
     _truckMetaSubscription?.cancel();
-    final String tid = (widget.focusTruckId ?? "Unknown").toUpperCase();
+    final String? currentAssignedTruck = _user?.preferredTruck;
+    final String tid = (widget.focusTruckId ?? currentAssignedTruck ?? "Unknown").toUpperCase();
     
     _truckMetaSubscription = _database.ref('trucks/$tid').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
@@ -148,6 +178,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   void dispose() {
     _clockTimer?.cancel();
     _truckSubscription?.cancel();
+    _userSubscription?.cancel();
     _truckMetaSubscription?.cancel();
     _routeSubscription?.cancel();
     _routeMetaSubscription?.cancel();
@@ -176,7 +207,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     } catch (e) {}
 
     _localGpsSubscription = geo.Geolocator.getPositionStream(
-      locationSettings: const geo.LocationSettings(accuracy: geo.LocationAccuracy.bestForNavigation, distanceFilter: 1),
+      locationSettings: const geo.LocationSettings(accuracy: geo.LocationAccuracy.bestForNavigation, distanceFilter: 0),
     ).listen((pos) {
       if (widget.isSimulation) return;
       if (mounted) {
@@ -195,9 +226,17 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       if (event.snapshot.exists && event.snapshot.value != null) {
         _lastTruckData = event.snapshot.value as Map;
         
-        final String tid = (widget.focusTruckId ?? "Unknown").toUpperCase();
+        // DEBUG STALE RECORDS
+        bool oldGT001Found = _lastTruckData!.containsKey("GT-001");
+        bool gt007Found = _lastTruckData!.containsKey("GT-007");
+        debugPrint("LIVE RECORDS FOR DRIVER: ${_lastTruckData!.keys.toList()}");
+        debugPrint("OLD GT-001 LIVE RECORD FOUND: $oldGT001Found");
+        debugPrint("GT-007 LIVE RECORD FOUND: $gt007Found");
+
+        final String tid = (widget.focusTruckId ?? _user?.preferredTruck ?? "Unknown").toUpperCase();
         if (_lastTruckData!.containsKey(tid)) {
           final myData = _lastTruckData![tid] as Map;
+          debugPrint("SELECTED CURRENT LIVE RECORD: $tid -> $myData");
           final String newStatus = (myData['status'] ?? "ACTIVE").toString().toUpperCase();
           if (newStatus != _currentStatus) {
             if (mounted) setState(() => _currentStatus = newStatus);
@@ -246,26 +285,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
               _updateRoutePolyline(points);
             }
             
-            final lastPoint = points.last;
-            final double lat = (lastPoint['lat'] ?? 0.0).toDouble();
-            final double lng = (lastPoint['lng'] ?? 0.0).toDouble();
+            // PRIORITY: Use Firebase route points for historical polyline rendering,
+            // but NEVER overwrite the current Driver marker with potentially stale Firebase data.
+            // Local GPS stream handles real-time marker movement for minimal delay.
             
-            if (lat != 0 && lng != 0) {
-              final latestPos = geo.Position(
-                latitude: lat, longitude: lng,
-                timestamp: DateTime.now(), accuracy: (lastPoint['accuracy'] ?? 0.0).toDouble(),
-                altitude: 0, heading: (lastPoint['heading'] ?? 0.0).toDouble(),
-                speed: (lastPoint['speed'] ?? 0.0).toDouble(),
-                speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0
-              );
-              
-              _lastLocalPos = latestPos;
-              _updateLocalDriverMarker(latestPos);
-              
-              if (_isFollowLocked && mapboxMap != null) {
-                mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat))));
-              }
-            }
             _lastPoints = points;
           }
         }
@@ -306,15 +329,61 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     if (mapboxMap == null) return;
 
     final String sourceId = "driver-live-location-source";
-      final tid = (widget.focusTruckId ?? "Unknown").toUpperCase();
     
+    // DELAY DEBUG LOGS
+    final int now = DateTime.now().millisecondsSinceEpoch;
+    final int gpsTs = pos.timestamp.millisecondsSinceEpoch;
+    final int localDelay = now - gpsTs;
+
+    debugPrint("--- REAL-TIME GPS UPDATE ---");
+    debugPrint("GPS POSITION: ${pos.latitude}, ${pos.longitude}");
+    debugPrint("GPS TIMESTAMP: ${pos.timestamp}");
+    debugPrint("MARKER UPDATE TIME: ${DateTime.now()}");
+    debugPrint("LOCAL DELAY: $localDelay ms");
+    debugPrint("FOLLOW MODE ACTIVE: $_isFollowLocked");
+    
+    // Resolve identity info with priority
+    // 1. Current Driver assignedTruckId (preferredTruck)
+    // 2. Current active trip truckId (from _lastSessionData)
+    // 3. Focus Truck ID (if valid)
+    
+    final String driverName = (_user?.name != null && _user!.name.trim().isNotEmpty) ? _user!.name : "DRIVER";
+    String? currentAssignedTruckId = _user?.preferredTruck;
+    String? tripTruckId = _lastSessionData?['truck_id']?.toString();
+    String? focusTruckId = (widget.focusTruckId != null && widget.focusTruckId!.toUpperCase() != "UNKNOWN") ? widget.focusTruckId : null;
+    
+    // AUTHORITATIVE RESOLUTION
+    String resolvedTruckId = currentAssignedTruckId ?? focusTruckId ?? tripTruckId ?? "N/A";
+    
+    if (resolvedTruckId.toUpperCase() == "UNKNOWN") {
+      resolvedTruckId = "N/A";
+    }
+
+    final String labelText = "$driverName\n${resolvedTruckId.toUpperCase()}";
+    
+    // DEBUG LOGS
+    debugPrint("==================================================");
+    debugPrint("DRIVER: $driverName");
+    debugPrint("CURRENT DRIVER ID: ${_user?.userId}");
+    debugPrint("assignedTruckId (preferred): $currentAssignedTruckId");
+    debugPrint("TRUCK DOC (tid used for meta): ${(widget.focusTruckId ?? currentAssignedTruckId ?? "Unknown").toUpperCase()}");
+    debugPrint("ACTIVE TRIP truckId: $tripTruckId");
+    debugPrint("WIDGET focusTruckId: ${widget.focusTruckId}");
+    debugPrint("FINAL DISPLAY TRUCK ID: $resolvedTruckId");
+    debugPrint("NUMBER OF OTHER TRUCK MARKERS: ${_truckMarkers.length}");
+    debugPrint("==================================================");
+
     final geojson = {
       "type": "FeatureCollection",
       "features": [
         {
           "type": "Feature", 
           "geometry": {"type": "Point", "coordinates": [pos.longitude, pos.latitude]}, 
-          "properties": {"name": "DRIVER", "truckId": tid, "status": _currentStatus}
+          "properties": {
+            "name": "DRIVER", 
+            "label": labelText,
+            "status": _currentStatus
+          }
         }
       ]
     };
@@ -355,7 +424,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           await style.addLayer(SymbolLayer(
             id: "driver-live-location-label", 
             sourceId: sourceId, 
-            textField: "DRIVER\n$tid",
+            textField: "{label}",
             textSize: 14.0, 
             textColor: Colors.green.toARGB32(), 
             textHaloColor: Colors.white.toARGB32(), 
@@ -381,6 +450,11 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         if (mounted) setState(() => _driverSourceCreated = true);
       } else {
         await style.setStyleSourceProperty(sourceId, "data", jsonEncode(geojson));
+      }
+
+      // ENSURE CAMERA FOLLOWS IF LOCKED - Applied immediately after source update
+      if (_isFollowLocked) {
+        mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(pos.longitude, pos.latitude))));
       }
     } catch (e) {}
   }
@@ -444,9 +518,33 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
   void _updateSingleTruckMarker(String id, Map data) {
     if (!_managersReady || _pointAnnotationManager == null) return;
+    
+    // DEDUPLICATION: Do not render markers for the CURRENT driver or CURRENT truck
+    final String currentDriverId = _user?.userId.toString() ?? "";
+    final String recordDriverId = data['driver_id']?.toString() ?? "";
+    
     final String truckId = (data['truck_id'] ?? id).toString().toUpperCase();
     final String targetId = (widget.focusTruckId ?? "Unknown").toUpperCase();
-    if (truckId == targetId) return; 
+    final String assignedTruckId = (_user?.preferredTruck ?? "").toUpperCase();
+
+    bool isCurrentDriver = (currentDriverId.isNotEmpty && recordDriverId == currentDriverId);
+    bool isCurrentTruck = (truckId == targetId || (assignedTruckId.isNotEmpty && truckId == assignedTruckId));
+
+    // DEBUG LOGS FOR DEDUPLICATION
+    if (truckId.contains("GT-001") || truckId.contains("GT-007")) {
+      debugPrint("DEDUPLICATION CHECK [$id / $truckId]: isCurrentDriver=$isCurrentDriver (Rec:$recordDriverId vs Cur:$currentDriverId), isCurrentTruck=$isCurrentTruck (Rec:$truckId vs Target:$targetId or Assigned:$assignedTruckId)");
+    }
+
+    if (isCurrentDriver || isCurrentTruck) {
+      // If it's a stale record for the current driver/truck, REMOVE it from the map
+      if (_truckMarkers.containsKey(id)) {
+        debugPrint("DEDUPLICATION: Removing stale/current marker for $id ($truckId)");
+        final marker = _truckMarkers[id]!;
+        _pointAnnotationManager?.delete(marker);
+        _truckMarkers.remove(id);
+      }
+      return;
+    }
 
     final double lat = (data['latitude'] ?? 0.0).toDouble();
     final double lng = (data['longitude'] ?? 0.0).toDouble();
@@ -454,6 +552,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     final point = Point(coordinates: Position(lng, lat));
     final String status = (data['status'] ?? "OFFLINE").toString().toUpperCase();
     final int color = status == "IDLE" ? Colors.orange.toARGB32() : Colors.green.toARGB32();
+
     if (_truckMarkers.containsKey(id)) {
       final marker = _truckMarkers[id]!;
       marker.geometry = point; marker.textField = "$truckId ($status)"; marker.textColor = color;
