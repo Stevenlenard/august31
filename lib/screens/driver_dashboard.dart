@@ -72,6 +72,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   String? _sessionId;
   DateTime? _lastGpsUpdateTime;
   Timer? _idleDetectionTimer;
+  bool _isInitializing = true;
   StreamSubscription? _statusSubscription;
   StreamSubscription? _purokStatusSubscription;
   StreamSubscription? _notificationSubscription;
@@ -143,22 +144,15 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
     if (mounted) {
       setState(() {
+        _isInitializing = true;
         _isRestoringSession = true;
         _startTime = "Restoring...";
         _status = "ACTIVE"; // Immediate operational status
       });
     }
 
-    // 2. Start essential listeners
-    _setupUserListener();
-    _setupTruckListener();
-    _setupListeners();
-    
-    // 3. Start GPS acquisition immediately in the background
-    _startTracking();
-    debugPrint("GPS INIT START: ${DateTime.now()}");
-
-    // 4. Update online presence in Firebase
+    // 2. Update online presence in Firebase IMMEDIATELY
+    // This ensures the status listener (started in step 3) sees ACTIVE, not a stale IDLE.
     await _database.ref('truck_locations').child(truckId).update({
       'isOnline': true,
       'status': 'ACTIVE',
@@ -168,11 +162,22 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     });
     debugPrint("ACTIVE STATUS WRITTEN AT: ${DateTime.now()}");
 
+    // 3. Start essential listeners
+    _setupUserListener();
+    _loadMaintenanceData(truckId);
+    _setupTruckListener();
+    _setupListeners();
+    
+    // 4. Start GPS acquisition in the background
+    _startTracking();
+    debugPrint("GPS INIT START: ${DateTime.now()}");
+
     // 5. Restore unfinished trip if it exists (AWAIT THIS)
     await _restoreTripSession(truckId, driverIdStr);
     
     if (mounted) {
       setState(() {
+        _isInitializing = false;
         _isRestoringSession = false;
       });
     }
@@ -185,14 +190,14 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     String? existingSessionId;
     Map? activeRouteData;
 
-    // A. Check truck_locations first (Direct path, NO INDEX NEEDED)
+    // 1. Check Driver document first (Most reliable persistent reference)
     try {
-      final locSnap = await _database.ref('truck_locations/$truckId').get();
-      if (locSnap.exists && locSnap.value != null) {
-        final lData = locSnap.value as Map;
-        if (lData['current_session'] != null) {
-          final String pointerId = lData['current_session'].toString();
-          debugPrint("[SESSION] Found current_session pointer: $pointerId");
+      final userSnap = await _database.ref('users/$driverIdStr').get();
+      if (userSnap.exists && userSnap.value != null) {
+        final uData = userSnap.value as Map;
+        if (uData['current_trip_id'] != null) {
+          final String pointerId = uData['current_trip_id'].toString();
+          debugPrint("[SESSION] Found current_trip_id in user doc: $pointerId");
           
           final routeSnap = await _database.ref('driver_routes/$pointerId').get();
           if (routeSnap.exists && routeSnap.value != null) {
@@ -203,21 +208,55 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
             bool isMySession = (sessionDriverId == driverIdStr || rData['driver_id'] == _user?.userId);
 
             // Check if it's actually ACTIVE
-            bool isActive = rData['route_status'] == 'ACTIVE' || (rData['isFinished'] != true && rData['finishTime'] == null);
+            bool isActive = rData['route_status'] == 'ACTIVE' || (rData['isFinished'] == false && rData['finishTime'] == null);
             
             if (isMySession && isActive) {
               existingSessionId = pointerId;
               activeRouteData = rData;
-              debugPrint("[SESSION] Primary recovery successful: $existingSessionId (Start Time: ${activeRouteData!['start_time']})");
+              debugPrint("[SESSION] Driver doc recovery successful: $existingSessionId (FIREBASE START TIME: ${activeRouteData['start_time']})");
             }
           }
         }
       }
     } catch (e) {
-      debugPrint("[SESSION] Primary recovery error: $e");
+      debugPrint("[SESSION] Driver doc recovery error: $e");
     }
 
-    // B. Fallback: Query driver_routes for ANY ACTIVE trip for this driver
+    // 2. Check truck_locations second (Direct path, NO INDEX NEEDED)
+    if (existingSessionId == null) {
+      try {
+        final locSnap = await _database.ref('truck_locations/$truckId').get();
+        if (locSnap.exists && locSnap.value != null) {
+          final lData = locSnap.value as Map;
+          if (lData['current_session'] != null) {
+            final String pointerId = lData['current_session'].toString();
+            debugPrint("[SESSION] Found current_session pointer: $pointerId");
+            
+            final routeSnap = await _database.ref('driver_routes/$pointerId').get();
+            if (routeSnap.exists && routeSnap.value != null) {
+              final rData = routeSnap.value as Map;
+              
+              // SECURITY: Ensure this session belongs to THIS driver
+              final String sessionDriverId = (rData['driver_id'] ?? '').toString();
+              bool isMySession = (sessionDriverId == driverIdStr || rData['driver_id'] == _user?.userId);
+
+              // Check if it's actually ACTIVE
+              bool isActive = rData['route_status'] == 'ACTIVE' || (rData['isFinished'] != true && rData['finishTime'] == null);
+              
+              if (isMySession && isActive) {
+                existingSessionId = pointerId;
+                activeRouteData = rData;
+                debugPrint("[SESSION] Primary recovery successful: $existingSessionId (FIREBASE START TIME: ${activeRouteData['start_time']})");
+              }
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint("[SESSION] Primary recovery error: $e");
+      }
+    }
+
+    // 3. Fallback: Query driver_routes for ANY ACTIVE trip for this driver
     if (existingSessionId == null) {
       try {
         debugPrint("[SESSION] Falling back to query driver_routes...");
@@ -258,8 +297,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     if (existingSessionId != null) {
       _sessionId = existingSessionId;
       if (activeRouteData != null && mounted) {
+        final String restoredStartTime = activeRouteData!['start_time'] ?? "--:--";
+        debugPrint("LOCAL RESTORED START TIME: $restoredStartTime");
+        
         setState(() {
-          _startTime = activeRouteData!['start_time'] ?? "--:--";
+          _startTime = restoredStartTime;
           _distance = (activeRouteData!['total_distance'] ?? 0.0).toDouble();
           
           if (activeRouteData!['server_start_time'] != null) {
@@ -268,10 +310,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
             _startDateTime = DateTime.fromMillisecondsSinceEpoch(activeRouteData!['timestamp'] as int);
           }
         });
-        debugPrint("RESTORED START TIME: $_startTime");
+        debugPrint("FINAL UI START TIME: $_startTime");
       }
       
-      // Force sync the CORRECT original Start Time to the live node
+      // Force sync the CORRECT original Start Time to the live node and user doc
+      await _database.ref('users/$driverIdStr').update({'current_trip_id': _sessionId});
       await _database.ref('truck_locations').child(truckId).update({
         'current_session': _sessionId,
         'start_time': _startTime,
@@ -282,13 +325,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       _setupRoutePointsListener();
       _startIdleDetection();
     } else {
-      debugPrint("[LIFECYCLE] No unfinished trip found.");
-      if (mounted) {
-        setState(() {
-          _startTime = "--:--";
-          _distance = 0.0;
-        });
-      }
+      debugPrint("[LIFECYCLE] No unfinished trip found. Creating new trip to ensure ACTIVE status.");
+      // Auto-start new trip if none found - Satisfies Test 5 requirement
+      await _startTripSession();
     }
   }
 
@@ -358,9 +397,20 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     _statusSubscription = _database.ref('truck_locations').child(truckId).onValue.listen((event) {
       if (event.snapshot.exists) {
         final data = event.snapshot.value as Map;
+        final String remoteStatus = data['status']?.toString().toUpperCase() ?? "OFFLINE";
+        
         if (mounted) {
+          debugPrint("STATUS UPDATE FROM FIREBASE: $remoteStatus (Current Local: $_status)");
+          
+          // During initialization, don't let a stale OFFLINE or IDLE from Firebase 
+          // overwrite our local ACTIVE status.
+          if (_isInitializing && (remoteStatus == "OFFLINE" || remoteStatus == "IDLE")) {
+             debugPrint("   -> IGNORING STALE STATUS DURING INITIALIZATION");
+             return;
+          }
+
           setState(() {
-            _status = data['status']?.toString().toUpperCase() ?? "OFFLINE";
+            _status = remoteStatus;
             // AUTHORITATIVE: Distance and Start Time are managed by the Driver app locally
             // and synced TO Firebase history, avoiding overwriting with stale data on re-login.
           });
@@ -535,6 +585,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       _sessionId = _database.ref('driver_routes').push().key;
       debugPrint("START TIME WRITE: NEW TRIP CREATED. ID: $_sessionId");
       
+      // Authoritative persistent reference in the Driver's own document
+      await _database.ref('users/$driverId').update({
+        'current_trip_id': _sessionId,
+      });
+
       _startDateTime = DateTime.now();
       String timeStr = DateFormat('h:mm a').format(_startDateTime!);
       debugPrint("[SESSION] New Start Time generated: $timeStr");
@@ -635,7 +690,10 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   void _processNewPosition(Position pos) {
     if (_sessionId == null || _status == "OFFLINE" || _status == "FINISHED") return;
     
-    // STRICT GPS FILTER FOR PRODUCTION WALKING TEST
+    // GPS FIX LOG
+    if (_currentPosition == null) {
+      debugPrint("GPS FIRST FIX: ${pos.latitude}, ${pos.longitude} AT: ${DateTime.now()}");
+    }
     // Reject extremely poor accuracy readings (e.g., 20000m)
     if (pos.accuracy > 50 && !_isSimulationMode) {
       debugPrint("[GPS FILTER] Rejected point due to poor accuracy: ${pos.accuracy}m");
@@ -1015,6 +1073,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
       _positionSubscription?.cancel();
       debugPrint("[FINISH] WRITE SUCCESS: Driver session closed safely.");
+
+      // Clear persistent user doc reference
+      await _database.ref('users/$driverId').update({
+        'current_trip_id': null,
+      });
 
       if (mounted) {
         setState(() { 
