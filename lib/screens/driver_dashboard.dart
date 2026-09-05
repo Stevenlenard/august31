@@ -143,7 +143,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       String? existingSessionId;
       Map? activeRouteData;
 
-      // 1. PRIMARY RECOVERY: Check truck_locations (No index needed)
+      // 1. PRIMARY RECOVERY: Check truck_locations (Direct pointer, survives regardless of time)
       final locSnap = await _database.ref('truck_locations/$truckId').get();
       if (locSnap.exists && locSnap.value != null) {
         final lData = locSnap.value as Map;
@@ -154,7 +154,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           final routeSnap = await _database.ref('driver_routes/$existingSessionId').get();
           if (routeSnap.exists && routeSnap.value != null) {
             final rData = routeSnap.value as Map;
-            // Only recover if it's actually still ACTIVE
+            // Only recover if it's actually still ACTIVE (not FINISHED)
             if (rData['route_status'] == 'ACTIVE') {
               activeRouteData = rData;
             } else {
@@ -168,11 +168,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         }
       }
 
-      // 2. FALLBACK RECOVERY: Query driver_routes (Needs index)
+      // 2. FALLBACK RECOVERY: Query driver_routes for ANY unfinished trip (regardless of date)
       if (existingSessionId == null) {
         try {
           debugPrint("[SESSION] Falling back to query driver_routes for driver_id: ${_user?.userId}");
           final routesRef = _database.ref('driver_routes');
+          // No date filter here ensures it survives overnight/long periods
           final activeRouteSnapshot = await routesRef
               .orderByChild('driver_id')
               .equalTo(_user?.userId)
