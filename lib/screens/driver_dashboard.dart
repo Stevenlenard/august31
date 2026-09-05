@@ -124,16 +124,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   bool _isRestoringSession = true;
-  bool _tripInitializationComplete = false;
-
-  bool _isRestoringSession = true;
-  bool _tripInitializationComplete = false;
 
   void _loadUser() async {
     if (!mounted) return;
     setState(() {
       _isRestoringSession = true;
-      _tripInitializationComplete = false;
     });
 
     _user = await SessionManager.getUser();
@@ -186,13 +181,13 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           debugPrint("[SESSION] Querying driver_routes for driver_id: ${_user?.userId} (${_user?.userId.runtimeType})");
           final routesRef = _database.ref('driver_routes');
           
-          // Try query with int first (default)
+          // Try to query with int first (default)
           var activeRouteSnapshot = await routesRef
               .orderByChild('driver_id')
               .equalTo(_user?.userId)
               .get();
           
-          // If no results, try query with String (just in case of type mismatch in DB)
+          // If no results, try to query with String (just in case of type mismatch in database)
           if (!activeRouteSnapshot.exists || activeRouteSnapshot.value == null) {
              debugPrint("[SESSION] No trips found with int driver_id, trying string...");
              activeRouteSnapshot = await routesRef
@@ -246,7 +241,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
             debugPrint("[LIFECYCLE] RESTORED START TIME: $_startTime");
             debugPrint("[LIFECYCLE] RESTORED DISTANCE: $_distance");
             
-            // Restore Start DateTime for speed calculations
+            // Restore Start date and time for speed calculations
             if (activeRouteData!['server_start_time'] != null) {
               _startDateTime = DateTime.fromMillisecondsSinceEpoch(activeRouteData!['server_start_time'] as int);
             } else if (activeRouteData!['timestamp'] != null) {
@@ -274,7 +269,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         _startTracking();
         _startIdleDetection();
         
-        if (mounted) setState(() { _isRestoringSession = false; _tripInitializationComplete = true; });
+        if (mounted) setState(() { _isRestoringSession = false; });
       } else {
         debugPrint("[LIFECYCLE] UNFINISHED TRIP FOUND: false");
         debugPrint("[LIFECYCLE] NEW TRIP CREATED: true");
@@ -288,7 +283,6 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         
         // Start a new trip session
         await _startTripSession(); 
-        if (mounted) setState(() => _tripInitializationComplete = true);
       }
       
       _setupListeners(); // Start listening for live updates from truck_locations node
@@ -565,7 +559,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       });
 
       _database.ref('truck_locations').child(truckId).onDisconnect().update({
-        'status': 'IDLE', // If app is killed or signal lost, mark as IDLE, not OFFLINE
+        'status': 'IDLE', // Mark as IDLE if app is killed or signal lost
         'isOnline': false,
         'lastSeen': ServerValue.timestamp,
       });
@@ -921,11 +915,11 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     debugPrint("[FINISH] LOG: Initial State - sessionId: $_sessionId, driverId: $driverId, status: $_status");
 
     try {
-      // 1. RECOVERY LOGIC: If _sessionId is null, try to find an active trip in Firebase
+      // 1. RECOVERY LOGIC: If session Id is null, try to find an active trip in Firebase
       if (_sessionId == null) {
         debugPrint("[FINISH] RECOVERY: Local sessionId is null. Searching Firebase...");
         
-        // A. Check truck_locations first (Direct path, NO INDEX NEEDED)
+        // 1. Check truck_locations first (Direct path, NO INDEX NEEDED)
         final locSnap = await _database.ref('truck_locations/$truckId').get();
         if (locSnap.exists && locSnap.value != null) {
           final lData = locSnap.value as Map;
@@ -942,7 +936,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           }
         }
 
-        // B. Fallback: Check driver_routes (Query, NEEDS INDEX)
+        // 2. Fallback: Check driver_routes (Query, NEEDS INDEX)
         if (_sessionId == null) {
           try {
             final routesRef = _database.ref('driver_routes');
@@ -1053,7 +1047,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         debugPrint("[FINISH] ERROR: $e");
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text("Failed to finish trip: $e"),
+            content: Text("Failed to finish Trip: $e"),
             backgroundColor: Colors.red,
           ));
         }
@@ -2049,8 +2043,8 @@ Positioned(
   void _showFinishConfirmation() async {
     debugPrint("[FINISH] DONE button clicked. Attempting to resolve session state...");
     
-    // We no longer block the button if _sessionId is null.
-    // Instead, we always show the confirmation and handle recovery/cleanup inside _finishTrip.
+    // We no longer block the button if session Id is null.
+    // Instead, we always show the confirmation and handle recovery/cleanup inside finish Trip.
 
     bool confirmed = await _showConfirmDialog(
       title: "Finish Trip?",
@@ -2069,7 +2063,7 @@ Positioned(
   void _showLogoutDialog(BuildContext context) async {
     bool confirmed = await _showConfirmDialog(
       title: "Sign Out?",
-      message: "Are you sure you want to end your session? You will need to login again to access your dashboard.",
+      message: "Are you sure you want to end your session? You will need to log in again to access your dashboard.",
       icon: Icons.logout_rounded,
     );
     if (confirmed) {
