@@ -123,11 +123,15 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     super.dispose();
   }
 
-  bool _isRestoringSession = true; // Guard to prevent creating new trips too early
+  bool _isRestoringSession = true;
+  bool _tripInitializationComplete = false;
 
   void _loadUser() async {
     if (!mounted) return;
-    setState(() => _isRestoringSession = true);
+    setState(() {
+      _isRestoringSession = true;
+      _tripInitializationComplete = false;
+    });
 
     _user = await SessionManager.getUser();
     if (_user != null) {
@@ -267,7 +271,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         _startTracking();
         _startIdleDetection();
         
-        if (mounted) setState(() { _isRestoringSession = false; });
+        if (mounted) setState(() { _isRestoringSession = false; _tripInitializationComplete = true; });
       } else {
         debugPrint("[LIFECYCLE] UNFINISHED TRIP FOUND: false");
         debugPrint("[LIFECYCLE] NEW TRIP CREATED: true");
@@ -280,7 +284,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         }
         
         // Start a new trip session
-        _startTripSession(); 
+        await _startTripSession(); 
+        if (mounted) setState(() => _tripInitializationComplete = true);
       }
       
       _setupListeners(); // Start listening for live updates from truck_locations node
@@ -357,9 +362,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           setState(() {
             _status = data['status']?.toString().toUpperCase() ?? "OFFLINE";
             _distance = (data['distance'] ?? 0.0).toDouble();
-            if (data['start_time'] != null) {
-              _startTime = data['start_time'];
-            }
+            // Removed start_time update from listener to prevent overwriting 
+            // the restored/authoritative Start Time with stale values.
           });
         }
       }
@@ -505,6 +509,12 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   // --- TRIP LOGIC ---
 
   Future<void> _startTripSession() async {
+    // PREVENT DUPLICATE TRIPS: If a session already exists, do not create another.
+    if (_sessionId != null) {
+      debugPrint("[SESSION] WARNING: _startTripSession called but _sessionId already exists ($_sessionId). Ignoring.");
+      return;
+    }
+
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
