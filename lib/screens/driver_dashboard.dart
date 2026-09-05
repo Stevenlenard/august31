@@ -126,6 +126,9 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   bool _isRestoringSession = true;
   bool _tripInitializationComplete = false;
 
+  bool _isRestoringSession = true;
+  bool _tripInitializationComplete = false;
+
   void _loadUser() async {
     if (!mounted) return;
     setState(() {
@@ -509,6 +512,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   // --- TRIP LOGIC ---
 
   Future<void> _startTripSession() async {
+    debugPrint("[SESSION] _startTripSession called. current _sessionId: $_sessionId");
+    
     // PREVENT DUPLICATE TRIPS: If a session already exists, do not create another.
     if (_sessionId != null) {
       debugPrint("[SESSION] WARNING: _startTripSession called but _sessionId already exists ($_sessionId). Ignoring.");
@@ -527,12 +532,18 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     final driverId = _user?.userId ?? "Unknown";
 
     try {
+      debugPrint("[SESSION] Requesting current position for new trip...");
       Position startPos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.bestForNavigation);
+      debugPrint("[SESSION] Start position obtained: ${startPos.latitude}, ${startPos.longitude}");
 
       _sessionId = _database.ref('driver_routes').push().key;
+      debugPrint("[SESSION] Generated new sessionId: $_sessionId");
+      
       _startDateTime = DateTime.now();
       String timeStr = DateFormat('h:mm a').format(_startDateTime!);
+      debugPrint("[SESSION] New Start Time generated: $timeStr");
 
+      debugPrint("[SESSION] Writing new session data to Firebase...");
       await _database.ref('truck_locations').child(truckId).update({
         'status': 'ACTIVE',
         'isOnline': true,
@@ -575,6 +586,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         'start_lng': startPos.longitude,
         'start_accuracy': startPos.accuracy,
       });
+      debugPrint("[SESSION] Firebase write complete for new trip.");
 
       Map<String, dynamic> initialProgress = {};
       for (int i = 0; i < _purokConfigs.length; i++) {
