@@ -127,24 +127,18 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
 
   void _loadUser() async {
     if (!mounted) return;
-    setState(() {
-      _isRestoringSession = true;
-    });
+    setState(() => _isRestoringSession = true);
 
     _user = await SessionManager.getUser();
     if (_user != null) {
-      debugPrint("[LIFECYCLE] LOGIN SUCCESS: true");
-      debugPrint("[LIFECYCLE] DRIVER ID: ${_user?.userId}");
-      debugPrint("[LIFECYCLE] CURRENT DRIVER NAME: ${_user?.name}");
+      final String driverId = _user!.userId.toString();
+      final String truckId = _user?.preferredTruck ?? "Unknown";
+
+      debugPrint("[SESSION] Starting recovery for Driver: $driverId, Truck: $truckId");
       
       _setupUserListener();
-      
-      final truckId = _user?.preferredTruck ?? "Unknown";
-
       _loadMaintenanceData(truckId);
       _setupTruckListener();
-
-      debugPrint("[SESSION] Checking for existing active trip for Driver: ${_user?.userId}");
       
       String? existingSessionId;
       Map? activeRouteData;
@@ -156,7 +150,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
           final lData = locSnap.value as Map;
           if (lData['current_session'] != null) {
             final String pointerId = lData['current_session'].toString();
-            debugPrint("[SESSION] Found current_session pointer in truck_locations: $pointerId");
+            debugPrint("[SESSION] Found current_session pointer: $pointerId");
             
             final routeSnap = await _database.ref('driver_routes/$pointerId').get();
             if (routeSnap.exists && routeSnap.value != null) {
@@ -164,9 +158,7 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
               if (rData['route_status'] == 'ACTIVE') {
                 existingSessionId = pointerId;
                 activeRouteData = rData;
-                debugPrint("[SESSION] Primary recovery successful: $existingSessionId");
-              } else {
-                debugPrint("[SESSION] Pointer exists but trip status is ${rData['route_status']}");
+                debugPrint("[SESSION] Primary recovery successful.");
               }
             }
           }
@@ -175,117 +167,79 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         debugPrint("[SESSION] Primary recovery error: $e");
       }
 
-      // 2. FALLBACK RECOVERY: Query driver_routes for ANY ACTIVE trip for this driver
+      // 2. FALLBACK RECOVERY: Query driver_routes
       if (existingSessionId == null) {
         try {
-          debugPrint("[SESSION] Querying driver_routes for driver_id: ${_user?.userId} (${_user?.userId.runtimeType})");
+          debugPrint("[SESSION] Falling back to query driver_routes...");
           final routesRef = _database.ref('driver_routes');
           
-          // Try to query with int first (default)
-          var activeRouteSnapshot = await routesRef
-              .orderByChild('driver_id')
-              .equalTo(_user?.userId)
-              .get();
+          // Try both int and string because Firebase is picky
+          final List<DataSnapshot> snapshots = [];
+          snapshots.add(await routesRef.orderByChild('driver_id').equalTo(_user?.userId).get());
+          snapshots.add(await routesRef.orderByChild('driver_id').equalTo(driverId).get());
           
-          // If no results, try to query with String (just in case of type mismatch in database)
-          if (!activeRouteSnapshot.exists || activeRouteSnapshot.value == null) {
-             debugPrint("[SESSION] No trips found with int driver_id, trying string...");
-             activeRouteSnapshot = await routesRef
-                .orderByChild('driver_id')
-                .equalTo(_user?.userId.toString())
-                .get();
-          }
-          
-          if (activeRouteSnapshot.exists && activeRouteSnapshot.value != null) {
-            final Map routes = activeRouteSnapshot.value as Map;
-            debugPrint("[SESSION] Fallback found ${routes.length} total sessions for driver.");
-            
-            int latestTimestamp = 0;
-            routes.forEach((key, value) {
-              final String status = (value['route_status'] ?? '').toString();
-              debugPrint("[SESSION] Checking Trip $key: status=$status, startTime=${value['start_time']}");
-
-              if (status == 'ACTIVE') {
-                int ts = (value['server_start_time'] ?? value['timestamp'] ?? 0) as int;
-                if (ts > latestTimestamp) {
-                  latestTimestamp = ts;
-                  existingSessionId = key.toString();
-                  activeRouteData = value as Map;
+          for (var snap in snapshots) {
+            if (snap.exists && snap.value != null) {
+              final Map routes = snap.value as Map;
+              int latestTs = 0;
+              routes.forEach((key, value) {
+                if (value['route_status'] == 'ACTIVE') {
+                  int ts = (value['server_start_time'] ?? value['timestamp'] ?? 0) as int;
+                  if (ts > latestTs) {
+                    latestTs = ts;
+                    existingSessionId = key.toString();
+                    activeRouteData = value as Map;
+                  }
                 }
-              }
-            });
-            
-            if (existingSessionId != null) {
-               debugPrint("[SESSION] Fallback recovery successful: $existingSessionId (Started at ${activeRouteData?['start_time']})");
+              });
+              if (existingSessionId != null) break;
             }
-          } else {
-            debugPrint("[SESSION] Fallback query returned NO sessions for driver in driver_routes.");
           }
         } catch (e) {
-          debugPrint("[SESSION] Fallback query failed: $e");
+          debugPrint("[SESSION] Fallback query error: $e");
         }
       }
 
       if (existingSessionId != null) {
         _sessionId = existingSessionId;
-        debugPrint("[LIFECYCLE] UNFINISHED TRIP FOUND: true");
-        debugPrint("[LIFECYCLE] RESTORED TRIP ID: $_sessionId");
+        debugPrint("[SESSION] Restoring session $_sessionId with start time: ${activeRouteData?['start_time']}");
         
-        // Restore session-based values
         if (activeRouteData != null && mounted) {
           setState(() {
-            _status = "ACTIVE"; // Immediate local restoration
+            _status = "ACTIVE";
             _startTime = activeRouteData!['start_time'] ?? "--:--";
             _distance = (activeRouteData!['total_distance'] ?? 0.0).toDouble();
             
-            debugPrint("[LIFECYCLE] RESTORED START TIME: $_startTime");
-            debugPrint("[LIFECYCLE] RESTORED DISTANCE: $_distance");
-            
-            // Restore Start date and time for speed calculations
             if (activeRouteData!['server_start_time'] != null) {
               _startDateTime = DateTime.fromMillisecondsSinceEpoch(activeRouteData!['server_start_time'] as int);
-            } else if (activeRouteData!['timestamp'] != null) {
-              _startDateTime = DateTime.fromMillisecondsSinceEpoch(activeRouteData!['timestamp'] as int);
             }
           });
         }
         
-        // Ensure truck_locations node is synchronized for Admin/Live tracking
         await _database.ref('truck_locations').child(truckId).update({
           'isOnline': true,
           'status': 'ACTIVE',
-          'lastSeen': ServerValue.timestamp,
-          'driver_id': _user?.userId,
-          'driver_name': _user?.name,
           'current_session': _sessionId,
           'start_time': _startTime,
           'distance': _distance,
+          'lastSeen': ServerValue.timestamp,
         });
-        
-        debugPrint("[LIFECYCLE] FIREBASE STATUS WRITTEN: ACTIVE (ONLINE)");
 
         _setupPurokListener();
         _setupRoutePointsListener();
         _startTracking();
         _startIdleDetection();
-        
-        if (mounted) setState(() { _isRestoringSession = false; });
       } else {
-        debugPrint("[LIFECYCLE] UNFINISHED TRIP FOUND: false");
-        debugPrint("[LIFECYCLE] NEW TRIP CREATED: true");
-        
+        debugPrint("[SESSION] No unfinished trip found. New trip will be needed.");
         if (mounted) {
           setState(() {
-            _status = "ACTIVE"; // Mark as active immediately upon login
-            _isRestoringSession = false;
+            _status = "OFFLINE"; // Stay offline until START is clicked
           });
         }
-        
-        // Start a new trip session
-        await _startTripSession(); 
       }
       
-      _setupListeners(); // Start listening for live updates from truck_locations node
+      if (mounted) setState(() => _isRestoringSession = false);
+      _setupListeners();
     }
   }
 
@@ -358,9 +312,8 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
         if (mounted) {
           setState(() {
             _status = data['status']?.toString().toUpperCase() ?? "OFFLINE";
-            _distance = (data['distance'] ?? 0.0).toDouble();
-            // Removed start_time update from listener to prevent overwriting 
-            // the restored/authoritative Start Time with stale values.
+            // AUTHORITATIVE: Distance and Start Time are managed by the Driver app locally
+            // and synced TO Firebase history, avoiding overwriting with stale data on re-login.
           });
         }
       }
