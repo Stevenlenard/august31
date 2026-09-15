@@ -18,23 +18,6 @@ import '../widgets/fade_slide_entrance.dart';
 import '../widgets/data_management_modal.dart';
 import '../widgets/custom_snackbar.dart';
 
-// Dummy implementation for missing services/screens to allow compilation
-class RouteOptimizationService {
-  Future<List<Position>> optimizeRoute(List<Position> stops) async => stops;
-}
-
-class ViewDailyRoutesScreen extends StatelessWidget {
-  final UserData? user;
-  const ViewDailyRoutesScreen({super.key, this.user});
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Daily Routes')),
-      body: const Center(child: Text('Route view coming soon')),
-    );
-  }
-}
-
 class DriverDashboard extends StatefulWidget {
   const DriverDashboard({super.key});
 
@@ -2897,7 +2880,6 @@ Positioned(
 
   void _showDailyRoutes() async {
     if (_user == null) return;
-    if (!mounted) return;
     Navigator.push(
       context, 
       MaterialPageRoute(builder: (context) => ViewDailyRoutesScreen(user: _user!))
