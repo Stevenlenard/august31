@@ -618,8 +618,18 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     final int gpsTs = pos.timestamp.millisecondsSinceEpoch;
     final int localDelay = now - gpsTs;
 
+    print("[DRIVER OWN LOCATION DEBUG] GPS latitude = ${pos.latitude}");
+    print("[DRIVER OWN LOCATION DEBUG] GPS longitude = ${pos.longitude}");
+    print("[DRIVER OWN LOCATION DEBUG] Marker latitude = ${pos.latitude}");
+    print("[DRIVER OWN LOCATION DEBUG] Marker longitude = ${pos.longitude}");
+    print("[DRIVER OWN LOCATION DEBUG] Mapbox GeoJSON coordinate: [${pos.longitude}, ${pos.latitude}]");
+
     debugPrint("--- REAL-TIME GPS UPDATE ---");
-    debugPrint("GPS POSITION: ${pos.latitude}, ${pos.longitude}");
+    debugPrint("[DRIVER OWN LOCATION DEBUG] GPS latitude = ${pos.latitude}");
+    debugPrint("[DRIVER OWN LOCATION DEBUG] GPS longitude = ${pos.longitude}");
+    debugPrint("[DRIVER OWN LOCATION DEBUG] Marker latitude = ${pos.latitude}");
+    debugPrint("[DRIVER OWN LOCATION DEBUG] Marker longitude = ${pos.longitude}");
+    debugPrint("[DRIVER OWN LOCATION DEBUG] Mapbox GeoJSON coordinate: [${pos.longitude}, ${pos.latitude}]");
     debugPrint("GPS TIMESTAMP: ${pos.timestamp}");
     debugPrint("MARKER UPDATE TIME: ${DateTime.now()}");
     debugPrint("LOCAL DELAY: $localDelay ms");
