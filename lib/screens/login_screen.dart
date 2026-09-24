@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../api/api_service.dart';
 import '../utils/app_theme.dart';
@@ -18,7 +17,6 @@ import '../utils/custom_notification.dart';
 import '../utils/route_persistence_manager.dart';
 import '../utils/responsive_text.dart';
 import '../widgets/custom_snackbar.dart';
-import '../services/notification_service.dart';
 import 'forgot_password_screen.dart';
 import 'register_choice_screen.dart';
 
@@ -35,7 +33,13 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passwordController = TextEditingController();
   bool _isLoading = false;
   bool _obscureText = true;
+  bool _rememberMe = true; // Auto Login / Remember Me preference
   IconData _currentLogoIcon = Icons.local_shipping_rounded;
+
+  // Saved Login Profile State
+  List<Map<String, dynamic>> _savedProfiles = [];
+  Map<String, dynamic>? _selectedProfile;
+  bool _showSavedProfileCard = false;
 
   final FocusNode _usernameFocus = FocusNode();
   final FocusNode _passwordFocus = FocusNode();
@@ -53,6 +57,7 @@ class _LoginScreenState extends State<LoginScreen> {
     super.initState();
     RoutePersistenceManager.saveLastRoute('/');
     _checkSecurityStatus();
+    _loadSavedProfiles();
     AppLocalizations.currentLanguage.addListener(_onLanguageChanged);
     
     // Real-time listeners
@@ -72,6 +77,20 @@ class _LoginScreenState extends State<LoginScreen> {
       }
       setState(() {}); 
     });
+  }
+
+  void _loadSavedProfiles() async {
+    final profiles = await SessionManager.getSavedProfiles();
+    if (mounted && profiles.isNotEmpty) {
+      setState(() {
+        _savedProfiles = profiles;
+        _selectedProfile = profiles.first;
+        _showSavedProfileCard = true;
+      });
+      debugPrint("[AUTH DEBUG] Saved profile exists: true");
+    } else {
+      debugPrint("[AUTH DEBUG] Saved profile exists: false");
+    }
   }
 
   @override
@@ -144,7 +163,6 @@ class _LoginScreenState extends State<LoginScreen> {
             _secondsRemaining = diff;
             _startLockoutTimer();
           } else {
-            // Lockout expired, reset immediately
             _secondsRemaining = 0;
             _securityStatus = SecurityStatus(attempts: 0, isLocked: false);
           }
@@ -169,6 +187,82 @@ class _LoginScreenState extends State<LoginScreen> {
         timer.cancel();
       }
     });
+  }
+
+  void _handleSavedProfileLogin() async {
+    if (_selectedProfile == null) return;
+    setState(() => _isLoading = true);
+
+    try {
+      final Map<String, dynamic> userData = Map<String, dynamic>.from(_selectedProfile!['user_data'] as Map? ?? _selectedProfile!);
+      final String userId = (_selectedProfile!['user_id'] ?? _selectedProfile!['id'] ?? userData['user_id'] ?? userData['id']).toString();
+      final String role = (userData['role'] ?? _selectedProfile!['role'] ?? 'resident').toString().toLowerCase();
+      final String name = (userData['name'] ?? _selectedProfile!['name'] ?? 'User').toString();
+
+      debugPrint("[AUTH DEBUG] Saved profile clicked for User ID: $userId");
+      debugPrint("[AUTH DEBUG] Role: $role");
+
+      // Save active session with rememberMe: true
+      await SessionManager.saveUser(userData, rememberMe: true);
+
+      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+        bool hasPermissions = await _checkAndRequestPermissions();
+        if (!hasPermissions) {
+          setState(() => _isLoading = false);
+          return;
+        }
+      }
+
+      if (mounted) {
+        debugPrint("[AUTH DEBUG] Auto-login result: SUCCESS");
+        CustomSnackBar.show(
+          context,
+          message: AppLocalizations.get('welcome_name').replaceFirst('{name}', name),
+        );
+
+        if (role == 'admin') {
+          Navigator.pushReplacementNamed(context, '/admin_dashboard');
+        } else if (role == 'driver') {
+          Navigator.pushReplacementNamed(context, '/driver_dashboard', arguments: userData);
+        } else if (role == 'resident') {
+          Navigator.pushReplacementNamed(context, '/resident_dashboard', arguments: userData);
+        }
+      }
+    } catch (e) {
+      debugPrint("[AUTH DEBUG] Auto-login result: FAILED ($e)");
+      if (mounted) {
+        CustomSnackBar.show(context, message: "Session expired. Please log in with password.", isError: true);
+        setState(() => _showSavedProfileCard = false);
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _handleRemoveSavedProfile() async {
+    if (_selectedProfile == null) return;
+    final String userId = (_selectedProfile!['user_id'] ?? _selectedProfile!['id']).toString();
+    final String name = (_selectedProfile!['name'] ?? 'Account').toString();
+
+    await SessionManager.removeSavedProfile(userId);
+    final profiles = await SessionManager.getSavedProfiles();
+
+    if (mounted) {
+      setState(() {
+        _savedProfiles = profiles;
+        if (profiles.isNotEmpty) {
+          _selectedProfile = profiles.first;
+        } else {
+          _selectedProfile = null;
+          _showSavedProfileCard = false;
+        }
+      });
+
+      CustomSnackBar.show(
+        context,
+        message: "Saved profile for $name removed.",
+      );
+    }
   }
 
   void _handleLogin() async {
@@ -199,10 +293,9 @@ class _LoginScreenState extends State<LoginScreen> {
         final role = user['role'];
         final name = user['name'] ?? username;
 
-        // Save User to Session
-        await SessionManager.saveUser(user);
+        // Save User to Session with Remember Me Preference
+        await SessionManager.saveUser(user, rememberMe: _rememberMe);
 
-        // Check for permissions on mobile devices before proceeding
         if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
           bool hasPermissions = await _checkAndRequestPermissions();
           if (!hasPermissions) {
@@ -211,7 +304,6 @@ class _LoginScreenState extends State<LoginScreen> {
           }
         }
 
-        // Show Welcome Message
         if (mounted) {
           CustomSnackBar.show(
             context,
@@ -227,7 +319,6 @@ class _LoginScreenState extends State<LoginScreen> {
           Navigator.pushReplacementNamed(context, '/resident_dashboard', arguments: user);
         }
       } else {
-        // Check if user exists using separate API calls as requested
         bool userExists = false;
         try {
           final userCheck = await ApiService().checkUsername(username);
@@ -237,7 +328,6 @@ class _LoginScreenState extends State<LoginScreen> {
           }
         } catch (e) {
           debugPrint("Account existence check error: $e");
-          // If check fails, we proceed with generic message
         }
 
         if (userExists) {
@@ -281,7 +371,6 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<bool> _checkAndRequestPermissions() async {
-    // 1. Trigger Native Location Prompt
     try {
       PermissionStatus locStatus = await Permission.location.request();
       
@@ -303,10 +392,8 @@ class _LoginScreenState extends State<LoginScreen> {
       debugPrint("Location permission error: $e");
     }
 
-    // Small delay to ensure OS handles the next prompt correctly
     await Future.delayed(const Duration(milliseconds: 500));
 
-    // 2. Trigger Native Notification Prompt
     try {
       PermissionStatus statusBefore = await Permission.notification.status;
       
@@ -317,14 +404,12 @@ class _LoginScreenState extends State<LoginScreen> {
           await SessionManager.setAppNotificationsEnabled(true);
           await SessionManager.setNotifPermissionRequested(true);
           
-          // User clicked ALLOW -> Redirect to App Settings as requested
           if (mounted) {
             CustomSnackBar.show(context, message: "Redirecting to system settings...", isError: false);
             await Future.delayed(const Duration(seconds: 1));
             await openAppSettings();
           }
         } else {
-          // User clicked DON'T ALLOW
           await SessionManager.setAppNotificationsEnabled(false);
           await SessionManager.setNotifPermissionRequested(true);
         }
@@ -338,9 +423,6 @@ class _LoginScreenState extends State<LoginScreen> {
 
     return true;
   }
-
-  // --- REMOVED: _showPermissionDialog helper as requested ---
-
 
   void _showLanguageModal() {
     final bool isWide = Responsive.isTablet(context) || Responsive.isDesktop(context);
@@ -432,6 +514,143 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  Widget _buildSavedProfileCard() {
+    if (_selectedProfile == null) return const SizedBox.shrink();
+
+    final String name = (_selectedProfile!['name'] ?? _selectedProfile!['email'] ?? 'User').toString();
+    final String email = (_selectedProfile!['email'] ?? '').toString();
+    final String role = (_selectedProfile!['role'] ?? 'resident').toString().toUpperCase();
+    final String? profilePic = _selectedProfile!['profile_picture']?.toString();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        // Avatar / Icon
+        Container(
+          width: 80,
+          height: 80,
+          decoration: BoxDecoration(
+            color: AppColors.tealText.withValues(alpha: 0.1),
+            shape: BoxShape.circle,
+            border: Border.all(color: AppColors.tealText, width: 2.5),
+            image: (profilePic != null && profilePic.isNotEmpty)
+                ? DecorationImage(image: NetworkImage(profilePic), fit: BoxFit.cover)
+                : null,
+          ),
+          child: (profilePic == null || profilePic.isEmpty)
+              ? Center(
+                  child: Text(
+                    name.isNotEmpty ? name[0].toUpperCase() : "U",
+                    style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: AppColors.tealText),
+                  ),
+                )
+              : null,
+        ),
+        const SizedBox(height: 16),
+        
+        // Name & Email
+        Text(
+          name,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A)),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          email,
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 13, color: Colors.grey.shade600, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 8),
+        
+        // Role Badge
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          decoration: BoxDecoration(
+            color: AppColors.tealText.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            role,
+            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: AppColors.tealText, letterSpacing: 1.0),
+          ),
+        ),
+
+        // Multiple Profiles Selector (If > 1 saved profile)
+        if (_savedProfiles.length > 1) ...[
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF5F7F9),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.grey.shade200),
+            ),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: (_selectedProfile!['user_id'] ?? _selectedProfile!['id']).toString(),
+                isExpanded: true,
+                icon: const Icon(Icons.keyboard_arrow_down_rounded, color: AppColors.tealText),
+                items: _savedProfiles.map((p) {
+                  final String pId = (p['user_id'] ?? p['id']).toString();
+                  final String pName = (p['name'] ?? p['email'] ?? 'User').toString();
+                  final String pEmail = (p['email'] ?? '').toString();
+                  return DropdownMenuItem<String>(
+                    value: pId,
+                    child: Text("$pName ($pEmail)", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF2C3E50)), overflow: TextOverflow.ellipsis),
+                  );
+                }).toList(),
+                onChanged: (val) {
+                  if (val != null) {
+                    setState(() {
+                      _selectedProfile = _savedProfiles.firstWhere((p) => (p['user_id'] ?? p['id']).toString() == val, orElse: () => _selectedProfile!);
+                    });
+                  }
+                },
+              ),
+            ),
+          ),
+        ],
+
+        const SizedBox(height: 24),
+
+        // Continue Button
+        HoverActionButton(
+          text: "Continue as ${name.split(' ').first}",
+          loadingText: "Restoring session...",
+          onTap: _handleSavedProfileLogin,
+          isLoading: _isLoading,
+        ),
+
+        const SizedBox(height: 20),
+
+        // Action Links
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            _HoverZoomLink(
+              onTap: () {
+                setState(() {
+                  _showSavedProfileCard = false;
+                });
+              },
+              child: const Text(
+                "Use another account",
+                style: TextStyle(color: AppColors.tealLink, fontWeight: FontWeight.w800, fontSize: 13),
+              ),
+            ),
+            _HoverZoomLink(
+              onTap: _handleRemoveSavedProfile,
+              child: const Text(
+                "Remove saved profile",
+                style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w800, fontSize: 13),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final double screenWidth = MediaQuery.of(context).size.width;
@@ -447,7 +666,6 @@ class _LoginScreenState extends State<LoginScreen> {
         body: SafeArea(
           child: Stack(
             children: [
-              // Main Scrollable Content
               Positioned.fill(
                 child: SingleChildScrollView(
                   physics: const BouncingScrollPhysics(),
@@ -472,7 +690,9 @@ class _LoginScreenState extends State<LoginScreen> {
                                 vertical: screenHeight * 0.02,
                               ),
                               decoration: AppDecorations.authCardDecoration(),
-                              child: Form(
+                              child: _showSavedProfileCard 
+                                ? _buildSavedProfileCard()
+                                : Form(
                                 key: _formKey,
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -499,36 +719,59 @@ class _LoginScreenState extends State<LoginScreen> {
                                       error: _passwordError,
                                     ),
                                     const SizedBox(height: 8),
-                                    Align(
-                                      alignment: Alignment.centerRight,
-                                      child: _HoverZoomLink(
-                                        onTap: () {
-                                          _clearAllErrors();
-                                          setState(() => _currentLogoIcon = Icons.lock_reset_rounded);
-                                          Future.delayed(const Duration(milliseconds: 150), () {
-                                            if (!mounted) return;
-                                            Navigator.push(
-                                              context,
-                                              PageRouteBuilder(
-                                                pageBuilder: (context, animation, secondaryAnimation) => const ForgotPasswordScreen(),
-                                                transitionsBuilder: (context, animation, secondaryAnimation, child) {
-                                                  return FadeTransition(
-                                                    opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
-                                                    child: child,
-                                                  );
-                                                },
-                                                transitionDuration: const Duration(milliseconds: 500),
+                                    
+                                    // Remember Me Checkbox & Forgot Password Row
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: Checkbox(
+                                                value: _rememberMe,
+                                                activeColor: AppColors.tealText,
+                                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                                                onChanged: (val) => setState(() => _rememberMe = val ?? true),
                                               ),
-                                            ).then((_) {
-                                              if (mounted) setState(() => _currentLogoIcon = Icons.local_shipping_rounded);
-                                            });
-                                          });
-                                        },
-                                        child: Text(
-                                          AppLocalizations.get('forgot_password'),
-                                          style: ResponsiveText.link(context, color: AppColors.tealLink).copyWith(fontSize: ResponsiveText.getFontSize(context, 13)),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            GestureDetector(
+                                              onTap: () => setState(() => _rememberMe = !_rememberMe),
+                                              child: const Text("Remember me", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF2C3E50))),
+                                            ),
+                                          ],
                                         ),
-                                      ),
+                                        _HoverZoomLink(
+                                          onTap: () {
+                                            _clearAllErrors();
+                                            setState(() => _currentLogoIcon = Icons.lock_reset_rounded);
+                                            Future.delayed(const Duration(milliseconds: 150), () {
+                                              if (!mounted) return;
+                                              Navigator.push(
+                                                context,
+                                                PageRouteBuilder(
+                                                  pageBuilder: (context, animation, secondaryAnimation) => const ForgotPasswordScreen(),
+                                                  transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                                                    return FadeTransition(
+                                                      opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
+                                                      child: child,
+                                                    );
+                                                  },
+                                                  transitionDuration: const Duration(milliseconds: 500),
+                                                ),
+                                              ).then((_) {
+                                                if (mounted) setState(() => _currentLogoIcon = Icons.local_shipping_rounded);
+                                              });
+                                            });
+                                          },
+                                          child: Text(
+                                            AppLocalizations.get('forgot_password'),
+                                            style: ResponsiveText.link(context, color: AppColors.tealLink).copyWith(fontSize: ResponsiveText.getFontSize(context, 13)),
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                     const SizedBox(height: 24),
                                     HoverActionButton(
@@ -580,22 +823,18 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ),
                       ),
-                      // Footer inside scroll for Web/Tablet
                       if (!isMobile) ...[
                         const SizedBox(height: 60),
                         _buildFooter(),
                         const SizedBox(height: 20),
                       ],
-                      // Spacer for the keyboard - aligns form with keyboard top
                       SizedBox(height: keyboardHeight),
-                      // Extra buffer for mobile fixed footer when keyboard is closed
                       if (isMobile && keyboardHeight == 0) const SizedBox(height: 120),
                     ],
                   ),
                 ),
               ),
               
-              // Fixed Footer for Mobile
               if (isMobile)
                 Positioned(
                   left: 0,

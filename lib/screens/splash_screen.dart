@@ -1,12 +1,9 @@
 import 'dart:async';
-// Splash screen for initial app loading
 import 'dart:io' show InternetAddress, Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:dio/dio.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:flutter/services.dart';
 import '../utils/route_persistence_manager.dart';
 import '../widgets/animated_auth_background.dart';
 import '../widgets/hover_action_button.dart';
@@ -16,7 +13,6 @@ import '../utils/app_localizations.dart';
 import '../utils/session_manager.dart';
 import '../utils/responsive.dart';
 import '../models/user.dart';
-import '../services/notification_service.dart';
 import 'login_screen.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -88,27 +84,20 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
       bool hasConnection = false;
 
       if (kIsWeb) {
-        // Web-safe check using Dio
         try {
           final dio = Dio(BaseOptions(
             connectTimeout: const Duration(seconds: 5),
             receiveTimeout: const Duration(seconds: 5),
           ));
-          // We just need to reach any stable URL. Google might have CORS issues
-          // but reaching it even with a CORS error usually means you have internet.
-          // Better: reach your own backend if available.
           await dio.get('https://www.google.com');
           hasConnection = true;
         } catch (e) {
-          // In Flutter Web, a CORS error still means we reached the server (internet is up)
-          // Only a network failure (no connection) will throw a specific DioException
           if (e is DioException) {
             if (e.type == DioExceptionType.connectionTimeout || 
                 e.type == DioExceptionType.sendTimeout ||
                 e.type == DioExceptionType.receiveTimeout) {
               hasConnection = false;
             } else {
-              // Most other errors (like CORS) imply we reached the internet
               hasConnection = true;
             }
           } else {
@@ -116,33 +105,39 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
           }
         }
       } else {
-        // Mobile check using InternetAddress
         final result = await InternetAddress.lookup('google.com').timeout(const Duration(seconds: 5));
         hasConnection = result.isNotEmpty && result[0].rawAddress.isNotEmpty;
       }
 
       if (hasConnection) {
         if (mounted) {
-          // 1. Hide loader first for a clean transition
           setState(() => _showLoader = false);
-          
-          // 2. Very brief delay to let the loader fade out
           await Future.delayed(const Duration(milliseconds: 300));
 
           if (!mounted) return;
 
-          // 3. Check for existing session
+          // Check session and remember me state for auto-login
           final bool loggedIn = await SessionManager.isLoggedIn();
+          final bool rememberMe = await SessionManager.isRememberMeEnabled();
           final UserData? user = await SessionManager.getUser();
 
-          if (loggedIn && user != null) {
+          debugPrint("[AUTH DEBUG] Firebase currentUser exists: ${user != null}");
+          debugPrint("[AUTH DEBUG] Saved profile exists: ${user != null}");
+          if (user != null) {
+            debugPrint("[AUTH DEBUG] User ID: ${user.userId}");
+            debugPrint("[AUTH DEBUG] Role: ${user.role}");
+          }
+
+          if (loggedIn && rememberMe && user != null) {
+            debugPrint("[AUTH DEBUG] Auto-login result: SUCCESS");
+            
+            // AUTHORITATIVE ROLE RESTORATION
             String role = user.role.toLowerCase();
             String route = '/';
             
-            // Check persistence first
             final String? lastRoute = await RoutePersistenceManager.getLastRoute();
             
-            if (lastRoute != null && lastRoute != '/' && lastRoute != '/splash') {
+            if (lastRoute != null && lastRoute != '/' && lastRoute != '/splash' && lastRoute != '/login') {
               route = lastRoute;
             } else {
               if (role == 'admin') {
@@ -154,11 +149,9 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
               }
             }
 
-            // --- TRIGGER NATIVE PERMISSION PROMPTS ---
             if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
               bool hasMandatory = await _checkMandatoryPermissions();
               if (!hasMandatory) {
-                // If location is denied, stop splash and show local error UI
                 if (mounted) {
                   setState(() {
                     _isChecking = false;
@@ -170,15 +163,14 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
             }
 
             if (mounted) {
-              Navigator.pushReplacementNamed(context, route, arguments: user);
+              Navigator.pushReplacementNamed(context, route, arguments: user.toJson());
             }
           } else {
-            // Check if we were in the middle of a Forgot Password flow even if not logged in
+            debugPrint("[AUTH DEBUG] Auto-login result: FAILED (No active session or Remember Me disabled)");
             final String? lastRoute = await RoutePersistenceManager.getLastRoute();
             if (lastRoute == '/forgot_password' && mounted) {
-               Navigator.pushReplacementNamed(context, '/forgot_password');
+              Navigator.pushReplacementNamed(context, '/forgot_password');
             } else if (mounted) {
-              // 4. No session, go to Login
               Navigator.pushReplacement(
                 context,
                 PageRouteBuilder(
@@ -215,20 +207,17 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
   }
 
   Future<bool> _checkMandatoryPermissions() async {
-    // 1. Trigger Native Location Prompt
     try {
       PermissionStatus locStatus = await Permission.location.request();
       if (!locStatus.isGranted && !locStatus.isLimited) {
-        return false; // ENFORCE: Block app entry if location is denied
+        return false;
       }
     } catch (_) {
       return false;
     }
 
-    // Small delay for OS stability
     await Future.delayed(const Duration(milliseconds: 500));
 
-    // 2. Trigger Native Notification Prompt via specialized Service
     try {
       PermissionStatus statusBefore = await Permission.notification.status;
       if (statusBefore.isDenied || statusBefore.isProvisional) {
@@ -236,7 +225,6 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
         if (statusAfter.isGranted) {
           await SessionManager.setAppNotificationsEnabled(true);
           await SessionManager.setNotifPermissionRequested(true);
-          // Redirect to system settings for channel verification as requested
           await openAppSettings();
         } else {
           await SessionManager.setAppNotificationsEnabled(false);
@@ -245,7 +233,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
       }
     } catch (_) {}
 
-    return true; // Allow entry as long as location is granted
+    return true;
   }
 
   void _showError() {
@@ -268,9 +256,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
   @override
   Widget build(BuildContext context) {
     final bool isDesktop = Responsive.isDesktop(context);
-    final bool isTablet = Responsive.isTablet(context);
     
-    // Responsive sizes scaled based on screen
     final double logoContainerSize = ResponsiveText.getIconSize(context, 120);
     final double iconSize = ResponsiveText.getIconSize(context, 64);
     final double loaderSize = ResponsiveText.getIconSize(context, 140);
@@ -301,7 +287,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                           height: loaderSize,
                           child: CircularProgressIndicator(
                             strokeWidth: isDesktop ? 4 : 3,
-                            valueColor: AlwaysStoppedAnimation<Color>(AppColors.tealText.withOpacity(0.5)),
+                            valueColor: AlwaysStoppedAnimation<Color>(AppColors.tealText.withValues(alpha: 0.5)),
                           ),
                         ),
                       ),
@@ -367,7 +353,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                               loadingMessage,
                               textAlign: TextAlign.center,
                               style: ResponsiveText.body(context, 
-                                color: AppColors.textGray.withAlpha(200)
+                                color: AppColors.textGray.withValues(alpha: 0.8)
                               ).copyWith(
                                 fontSize: ResponsiveText.getFontSize(context, 14),
                                 letterSpacing: 0.5,
@@ -383,7 +369,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                     Container(
                       padding: const EdgeInsets.all(24),
                       decoration: BoxDecoration(
-                        color: Colors.white.withAlpha(240),
+                        color: Colors.white.withValues(alpha: 0.95),
                         borderRadius: BorderRadius.circular(32),
                         boxShadow: [
                           BoxShadow(color: Colors.black.withAlpha(15), blurRadius: 20, offset: const Offset(0, 10))
@@ -428,36 +414,3 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
     );
   }
 }
-
-class _HoverZoomLink extends StatefulWidget {
-  final Widget child;
-  final VoidCallback? onTap;
-  const _HoverZoomLink({required this.child, this.onTap});
-  @override
-  State<_HoverZoomLink> createState() => _HoverZoomLinkState();
-}
-
-class _HoverZoomLinkState extends State<_HoverZoomLink> {
-  bool _isActive = false;
-  @override
-  Widget build(BuildContext context) {
-    bool isEnabled = widget.onTap != null;
-    return MouseRegion(
-      onEnter: (_) => setState(() => _isActive = isEnabled),
-      onExit: (_) => setState(() => _isActive = false),
-      cursor: isEnabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
-      child: GestureDetector(
-        onTapDown: (_) => setState(() => _isActive = isEnabled),
-        onTapUp: (_) => setState(() => _isActive = false),
-        onTapCancel: () => setState(() => _isActive = false),
-        onTap: widget.onTap,
-        child: AnimatedScale(
-          scale: _isActive ? 1.05 : 1.0,
-          duration: const Duration(milliseconds: 200),
-          child: widget.child,
-        ),
-      ),
-    );
-  }
-}
-
