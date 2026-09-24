@@ -1224,8 +1224,23 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     }
   }
 
-  void _startTracking() {
+  void _startTracking() async {
     _positionSubscription?.cancel();
+
+    try {
+      Position initialPos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.bestForNavigation,
+      );
+      if (mounted) {
+        setState(() {
+          _currentPosition = initialPos;
+          _lastGpsUpdateTime = DateTime.now();
+        });
+      }
+    } catch (e) {
+      debugPrint("[GPS INITIAL FIX ERROR] $e");
+    }
+
     _positionSubscription = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.bestForNavigation, 
@@ -1235,10 +1250,19 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
   }
 
   void _processNewPosition(Position pos) {
+    bool wasNull = _currentPosition == null;
+
+    if (mounted) {
+      setState(() {
+        _currentPosition = pos;
+        _lastGpsUpdateTime = DateTime.now();
+      });
+    }
+
     if (_sessionId == null || _status == "OFFLINE" || _status == "FINISHED") return;
     
     // GPS FIX LOG
-    if (_currentPosition == null) {
+    if (wasNull) {
       debugPrint("GPS FIRST FIX: ${pos.latitude}, ${pos.longitude} AT: ${DateTime.now()}");
       
       // TRIGGER AUTO-OPTIMIZATION ON FIRST FIX
@@ -3239,16 +3263,19 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
     
     // --- STATE 1: NO DATA OR CALCULATING (Action Card with In-Button Loading) ---
     if (_optimizedData == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _tryAutoOptimizeRoute("CARD_BUILD");
+      });
       return _buildActionCard(
-        "Route Optimization", 
-        "Calculate the fastest collection path", 
+        "AI Route Optimization", 
+        "Auto-optimizing collection path...", 
         Icons.alt_route_rounded, 
         const Color(0xFFE3F2FD), 
         const Color(0xFF2196F3), 
-        isLoading: _isOptimizing,
+        isLoading: true,
         onTap: () {
           debugPrint("ROUTE OPTIMIZATION CARD CLICKED");
-          _optimizeRoute();
+          _optimizeRoute(isAuto: false);
         }
       );
     }
@@ -4517,18 +4544,29 @@ class _DriverDashboardState extends State<DriverDashboard> with TickerProviderSt
       debugPrint("CRITICAL OPTIMIZATION FAILURE: $e");
       if (!isAuto) CustomSnackBar.show(context, message: "Route optimization temporarily unavailable.", isError: true);
     } finally {
-      if (mounted && !isAuto) {
+      if (mounted) {
         debugPrint("OPTIMIZATION FLOW FINISHED: Resetting loading state.");
         setState(() => _isOptimizing = false);
       }
     }
   }
 
-  void _tryAutoOptimizeRoute(String trigger) {
+  void _tryAutoOptimizeRoute(String trigger) async {
     debugPrint("========== AUTO OPTIMIZATION CHECK ==========");
     debugPrint("TRIGGER: $trigger");
     
     bool tripReady = _sessionId != null;
+
+    if (_currentPosition == null) {
+      try {
+        final lastPos = await Geolocator.getLastKnownPosition();
+        if (lastPos != null && mounted) {
+          _currentPosition = lastPos;
+          _lastGpsUpdateTime = DateTime.now();
+        }
+      } catch (_) {}
+    }
+
     bool gpsReady = _currentPosition != null;
     bool areasReady = _purokConfigs.isNotEmpty;
     bool weeklyReady = !_isWeeklyProgressLoading;

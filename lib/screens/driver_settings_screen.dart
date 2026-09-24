@@ -1627,9 +1627,12 @@ class _DriverSettingsScreenState extends State<DriverSettingsScreen> with Ticker
               double currentTripDist = 0.0;
               if (locSnapshot.hasData && locSnapshot.data!.snapshot.value != null) {
                 final loc = locSnapshot.data!.snapshot.value as Map;
-                // Only if it's an active session, we show live preview
-                if (loc['current_session'] != null) {
-                  currentTripDist = (loc['distance'] ?? 0.0).toDouble();
+                final double dist = (loc['distance'] ?? 0.0).toDouble();
+                final String st = (loc['status'] ?? '').toString().toUpperCase();
+                if (dist > 0 && st != 'COMPLETED' && st != 'OFFLINE') {
+                  currentTripDist = dist;
+                } else if (loc['current_session'] != null) {
+                  currentTripDist = dist;
                 }
               }
 

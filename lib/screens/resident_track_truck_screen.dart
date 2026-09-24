@@ -13,6 +13,7 @@ import '../widgets/custom_snackbar.dart';
 import '../widgets/fade_slide_entrance.dart';
 import '../utils/custom_notification.dart';
 import '../services/truck_assignment_service.dart';
+import '../api/api_service.dart';
 
 class ResidentTrackTruckScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -36,6 +37,10 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
   final Map<String, StreamSubscription> _routeSubscriptions = {};
   final Map<String, Position?> _sessionStartPoints = {};
   final Map<String, List<Map>> _lastRoutePoints = {};
+
+  String? _followedTruckId;
+  Timer? _phpSyncTimer;
+  final ApiService _apiService = ApiService();
 
   bool _isUpdatingMarkers = false;
   bool _isFollowLocked = true;
@@ -62,6 +67,8 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     _loadUser();
     _listenToTrucks();
     _getResidentLocation();
+    _syncPhpLocations();
+    _phpSyncTimer = Timer.periodic(const Duration(seconds: 8), (_) => _syncPhpLocations());
     _circleController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 15),
@@ -83,6 +90,37 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         });
       }
     });
+  }
+
+  void _syncPhpLocations() async {
+    try {
+      final response = await _apiService.getLocations();
+      if (response.data != null && response.data['locations'] != null) {
+        final List phpLocations = response.data['locations'] as List;
+        final Map<String, dynamic> phpMap = {};
+        for (var loc in phpLocations) {
+          final String tid = (loc['truck_id'] ?? loc['truckId'] ?? '').toString().toUpperCase();
+          if (tid.isNotEmpty) {
+            phpMap[tid] = {
+              'truck_id': tid,
+              'driver_name': loc['driver_name'] ?? loc['driverName'] ?? 'Driver',
+              'latitude': double.tryParse(loc['latitude']?.toString() ?? '0') ?? 0.0,
+              'longitude': double.tryParse(loc['longitude']?.toString() ?? '0') ?? 0.0,
+              'speed': double.tryParse(loc['speed']?.toString() ?? '0') ?? 0.0,
+              'status': (loc['status'] ?? 'ACTIVE').toString().toUpperCase(),
+              'isOnline': true,
+              'lastSeen': DateTime.now().millisecondsSinceEpoch,
+            };
+          }
+        }
+        if (phpMap.isNotEmpty && mounted) {
+          _liveLocations.addAll(phpMap);
+          _processMergedTrucks();
+        }
+      }
+    } catch (e) {
+      debugPrint("PHP locations sync error: $e");
+    }
   }
 
   void _handleManualRefresh() async {
@@ -204,6 +242,7 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
   @override
   void dispose() {
     _routeSubscriptions.forEach((key, sub) => sub.cancel());
+    _phpSyncTimer?.cancel();
     _circleController.dispose();
     _refreshRotationController.dispose();
     _pulseTimer?.cancel();
@@ -253,22 +292,19 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
 
   void _processMergedTrucks() {
     final List<Map<dynamic, dynamic>> mergedList = [];
-    final int now = DateTime.now().millisecondsSinceEpoch;
     final Set<String> processedTruckIds = {};
 
     _liveLocations.forEach((key, rawLive) {
       if (rawLive == null || rawLive is! Map) return;
       final Map liveData = Map<String, dynamic>.from(rawLive);
       final String tid = (liveData['truck_id'] ?? key).toString().toUpperCase();
+      final String status = (liveData['status'] ?? 'ACTIVE').toString().toUpperCase();
       processedTruckIds.add(tid);
 
-      final bool isOnlineField = liveData['isOnline'] == true;
-      final String status = (liveData['status'] ?? 'OFFLINE').toString().toUpperCase();
-      final dynamic lastSeenRaw = liveData['lastSeen'];
-      final int lastSeen = lastSeenRaw is num ? lastSeenRaw.toInt() : 0;
-      
-      final bool isFresh = lastSeen > 0 && (now - lastSeen).abs() < 120000;
-      final bool isGenuinelyOnline = isOnlineField && status != 'OFFLINE' && isFresh;
+      final double lat = double.tryParse(liveData['latitude']?.toString() ?? liveData['lat']?.toString() ?? '0') ?? 0.0;
+      final double lng = double.tryParse(liveData['longitude']?.toString() ?? liveData['lng']?.toString() ?? '0') ?? 0.0;
+      final bool hasValidCoords = (lat != 0.0 && lng != 0.0);
+      final bool isGenuinelyOnline = hasValidCoords && status != 'OFFLINE';
 
       final resolved = TruckAssignmentService.resolveFleetNode(
         nodeKey: key.toString(),
@@ -283,8 +319,10 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         'truckNumber': resolved.truckNumber,
         'plate_number': resolved.plateNumber,
         'driver_name': resolved.driverName,
+        'latitude': lat,
+        'longitude': lng,
         'isOnline': isGenuinelyOnline,
-        'status': isGenuinelyOnline ? status : 'OFFLINE',
+        'status': status,
       });
     });
 
@@ -306,6 +344,21 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
     if (mounted) {
       setState(() => _trucks = mergedList);
       _updateTruckMarkers();
+
+      // Real-time camera follow for targeted driver
+      if (_isFollowLocked && _followedTruckId != null) {
+        final followed = mergedList.firstWhere(
+          (t) => (t['truck_id'] ?? t['truckId'] ?? '').toString().toUpperCase() == _followedTruckId!.toUpperCase(),
+          orElse: () => {},
+        );
+        if (followed.isNotEmpty) {
+          final double lat = (followed['latitude'] ?? 0.0).toDouble();
+          final double lng = (followed['longitude'] ?? 0.0).toDouble();
+          if (lat != 0 && lng != 0) {
+            mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat))));
+          }
+        }
+      }
       
       final activeTruckIds = mergedList
           .where((t) => t['isOnline'] == true)
@@ -442,11 +495,11 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
 
   void _recenterToBalintawak() { mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: _balintawakCenter), zoom: 14.5)); }
   void _recenterToResident() { if (_residentPosition == null) return; mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(_residentPosition!.longitude, _residentPosition!.latitude)), zoom: 16.5)); }
-  void _focusOnTruck(Map<dynamic, dynamic> truck) {
+  void _focusOnTruck(Map<dynamic, dynamic> truck, {double zoom = 17.5}) {
     final double lat = (truck['latitude'] ?? 0.0).toDouble();
     final double lng = (truck['longitude'] ?? 0.0).toDouble();
     if (lat == 0 || lng == 0) return;
-    mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat)), zoom: 17.5));
+    mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat)), zoom: zoom));
   }
 
   void _onMapCreated(MapboxMap map) { mapboxMap = map; }
@@ -620,33 +673,6 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // FOLLOW TOGGLE (TARGET ICON)
-          _buildMapControlButton(
-            icon: _isFollowLocked ? Icons.gps_fixed_rounded : Icons.gps_not_fixed_rounded,
-            isActive: _isFollowLocked || _isTargetActive,
-            size: btnSize,
-            iconSize: iconSize,
-            onTap: () {
-              setState(() {
-                _isFollowLocked = !_isFollowLocked;
-                _isTargetActive = true;
-              });
-              if (_isFollowLocked && _residentPosition != null) {
-                mapboxMap?.setCamera(CameraOptions(
-                    center: Point(coordinates: Position(_residentPosition!.longitude, _residentPosition!.latitude)),
-                    zoom: 16.5));
-                mapboxMap?.gestures.updateSettings(
-                    GesturesSettings(scrollEnabled: false, rotateEnabled: false, pitchEnabled: false));
-              } else {
-                mapboxMap?.gestures.updateSettings(
-                    GesturesSettings(scrollEnabled: true, rotateEnabled: true, pitchEnabled: true));
-              }
-              Future.delayed(const Duration(seconds: 2), () {
-                if (mounted) setState(() => _isTargetActive = false);
-              });
-            },
-          ),
-          const SizedBox(height: 12),
           // RECENTER (MAP ICON)
           _buildMapControlButton(
             icon: Icons.map_outlined,
@@ -1192,9 +1218,12 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         : "--";
     String lastUpdate = truck['updatedAt'] != null ? "just now" : "Offline";
 
+    final bool isBeingFollowed = _isFollowLocked && _followedTruckId?.toUpperCase() == tid.toUpperCase();
+
     return _HoverZoomCard(
       onTap: () => _focusOnTruck(truck),
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         padding: const EdgeInsets.all(24),
         decoration: BoxDecoration(
@@ -1202,10 +1231,10 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
             borderRadius: BorderRadius.circular(32),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.12),
-                blurRadius: 20,
+                color: isBeingFollowed ? const Color(0xFF00796B).withOpacity(0.25) : Colors.black.withOpacity(0.12),
+                blurRadius: isBeingFollowed ? 25 : 20,
                 offset: const Offset(0, 0),
-                spreadRadius: 2,
+                spreadRadius: isBeingFollowed ? 3 : 2,
               ),
               BoxShadow(
                 color: Colors.black.withOpacity(0.08),
@@ -1214,16 +1243,23 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
                 spreadRadius: 0,
               ),
             ],
-            border: Border.all(color: Colors.grey.shade50, width: 1)),
+            border: Border.all(
+              color: isBeingFollowed ? const Color(0xFF00796B) : Colors.grey.shade100, 
+              width: isBeingFollowed ? 2.5 : 1
+            )),
         child: Column(children: [
-          // Top Row: Icon, Name/License, Status
+          // Top Row: Icon, Name/License, Status & TRACKING badge
           Row(children: [
             Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                    color: const Color(0xFFE3F2FD), borderRadius: BorderRadius.circular(16)),
-                child:
-                    const Icon(Icons.local_shipping_rounded, color: Color(0xFF2196F3), size: 28)),
+                    color: isBeingFollowed ? const Color(0xFFE0F2F1) : const Color(0xFFE3F2FD), 
+                    borderRadius: BorderRadius.circular(16)),
+                child: Icon(
+                  Icons.local_shipping_rounded, 
+                  color: isBeingFollowed ? const Color(0xFF00796B) : const Color(0xFF2196F3), 
+                  size: 28
+                )),
             const SizedBox(width: 16),
             Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1234,12 +1270,35 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
                   style: const TextStyle(
                       color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w600))
             ])),
-            Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                    color: statusColor.withAlpha(20), borderRadius: BorderRadius.circular(12)),
-                child: Text(status,
-                    style: TextStyle(color: statusColor, fontSize: 9, fontWeight: FontWeight.w900))),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                        color: statusColor.withAlpha(20), borderRadius: BorderRadius.circular(12)),
+                    child: Text(status,
+                        style: TextStyle(color: statusColor, fontSize: 9, fontWeight: FontWeight.w900))),
+                if (isBeingFollowed) ...[
+                  const SizedBox(height: 4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00796B),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.gps_fixed_rounded, color: Colors.white, size: 10),
+                        SizedBox(width: 4),
+                        Text("TRACKING", style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w900)),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ]),
 
           const SizedBox(height: 24),
@@ -1297,6 +1356,11 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
                   Icons.near_me_rounded,
                   _comparingTrucks.contains(tid) ? Colors.orange : const Color(0xFF00796B),
                   () => _togglePath(tid)),
+            ),
+            const SizedBox(width: 12),
+            _buildTargetButton(
+              isBeingFollowed: isBeingFollowed,
+              onTap: () => _toggleFollowTruck(tid, truck),
             ),
           ]),
 
@@ -1428,6 +1492,54 @@ class _ResidentTrackTruckScreenState extends State<ResidentTrackTruckScreen> wit
         );
       }
       _updateTruckMarkers();
+    });
+  }
+
+  Widget _buildTargetButton({required bool isBeingFollowed, required VoidCallback onTap}) {
+    final Color btnColor = isBeingFollowed ? const Color(0xFF004D40) : const Color(0xFF00796B);
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          color: btnColor,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: btnColor.withAlpha(60),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            )
+          ],
+          border: isBeingFollowed
+              ? Border.all(color: Colors.tealAccent, width: 2)
+              : null,
+        ),
+        alignment: Alignment.center,
+        child: Icon(
+          isBeingFollowed ? Icons.gps_fixed_rounded : Icons.my_location_rounded,
+          color: Colors.white,
+          size: 20,
+        ),
+      ),
+    );
+  }
+
+  void _toggleFollowTruck(String truckId, Map<dynamic, dynamic> truck) {
+    setState(() {
+      final String canonicalId = truckId.toUpperCase();
+      if (_followedTruckId?.toUpperCase() == canonicalId && _isFollowLocked) {
+        _followedTruckId = null;
+        _isFollowLocked = false;
+        CustomNotification.showTopNotification(context, "Stopped tracking unit $truckId", false);
+      } else {
+        _followedTruckId = canonicalId;
+        _isFollowLocked = true;
+        _focusOnTruck(truck, zoom: 17.5);
+        CustomNotification.showTopNotification(context, "Now tracking live location of unit $truckId", false);
+      }
     });
   }
 

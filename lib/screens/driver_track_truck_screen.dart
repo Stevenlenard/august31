@@ -572,7 +572,13 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
     try {
       await mapboxMap?.location.updateSettings(LocationComponentSettings(enabled: false, pulsingEnabled: false));
     } catch (e) {}
-    await mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: _balintawakCenter), zoom: 14.5));
+    
+    if (_lastLocalPos != null) {
+      await mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(_lastLocalPos!.longitude, _lastLocalPos!.latitude)), zoom: 16.5));
+    } else {
+      await mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: _balintawakCenter), zoom: 14.5));
+    }
+
     try {
       await Future.delayed(const Duration(milliseconds: 800));
       _pointAnnotationManager = await mapboxMap!.annotations.createPointAnnotationManager();
@@ -597,6 +603,13 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with Ti
   Future<void> _updateLocalDriverMarker(geo.Position pos) async {
     if (widget.isHistorical) return;
     if (mapboxMap == null) return;
+
+    if (_isFollowLocked || _lastLocalPos == null) {
+      mapboxMap?.setCamera(CameraOptions(
+        center: Point(coordinates: Position(pos.longitude, pos.latitude)),
+        zoom: 16.5,
+      ));
+    }
 
     final String sourceId = "driver-live-location-source";
     
