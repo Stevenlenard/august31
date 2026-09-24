@@ -3,6 +3,7 @@ import '../api/api_service.dart';
 import '../utils/session_manager.dart';
 import '../utils/app_theme.dart';
 import '../utils/custom_notification.dart';
+import '../utils/app_localizations.dart';
 import 'dart:async';
 
 class Verify2FAScreen extends StatefulWidget {
@@ -18,10 +19,27 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
   bool _isLoading = false;
   final ApiService _apiService = ApiService();
 
+  @override
+  void initState() {
+    super.initState();
+    AppLocalizations.currentLanguage.addListener(_onLanguageChanged);
+  }
+
+  @override
+  void dispose() {
+    AppLocalizations.currentLanguage.removeListener(_onLanguageChanged);
+    _otpController.dispose();
+    super.dispose();
+  }
+
+  void _onLanguageChanged() {
+    if (mounted) setState(() {});
+  }
+
   void _handleVerify() async {
     final otp = _otpController.text.trim();
     if (otp.length != 6) {
-      CustomNotification.showTopNotification(context, "Please enter the 6-digit code");
+      CustomNotification.showTopNotification(context, AppLocalizations.get('enter_otp_code'));
       return;
     }
 
@@ -44,13 +62,13 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
         } catch (sessionError) {
           debugPrint("Session Save Error: $sessionError");
           if (!mounted) return;
-          CustomNotification.showTopNotification(context, "Local session error. Please try again.");
+          CustomNotification.showTopNotification(context, AppLocalizations.get('err_general'));
           setState(() => _isLoading = false);
           return;
         }
         
         if (!mounted) return;
-        CustomNotification.showTopNotification(context, "Verification Successful!", false);
+        CustomNotification.showTopNotification(context, AppLocalizations.get('verification_successful'), false);
 
         Timer(const Duration(milliseconds: 800), () {
           if (!mounted) return;
@@ -70,16 +88,15 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
         });
       } else {
         if (!mounted) return;
-        String msg = "Invalid verification code";
+        String msg = AppLocalizations.get('err_otp_invalid');
         if (data is Map && data['message'] != null) msg = data['message'];
-        else if (data is String) msg = data;
         
         CustomNotification.showTopNotification(context, msg);
       }
     } catch (e) {
       debugPrint("Verify Error: $e");
       if (!mounted) return;
-      CustomNotification.showTopNotification(context, "Error: ${e.toString()}");
+      CustomNotification.showTopNotification(context, AppLocalizations.get('err_network'));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -87,11 +104,11 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
 
   void _handleResend() async {
     try {
-      CustomNotification.showTopNotification(context, "Sending new code...", false);
+      CustomNotification.showTopNotification(context, AppLocalizations.get('sending_code'), false);
       await _apiService.forgotPassword(widget.userData['email']);
     } catch (e) {
       if (!mounted) return;
-      CustomNotification.showTopNotification(context, "Failed to resend code");
+      CustomNotification.showTopNotification(context, AppLocalizations.get('err_resend_failed'));
     }
   }
 
@@ -104,6 +121,7 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
         decoration: AppDecorations.loginBackground,
         child: Center(
           child: SingleChildScrollView(
+            physics: const ClampingScrollPhysics(),
             child: Container(
               constraints: const BoxConstraints(maxWidth: 450),
               margin: const EdgeInsets.symmetric(horizontal: 24),
@@ -132,9 +150,9 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
                     child: const Icon(Icons.security_rounded, size: 40, color: Color(0xFF4CAF50)),
                   ),
                   const SizedBox(height: 32),
-                  const Text(
-                    'Two-Step Verification',
-                    style: TextStyle(
+                  Text(
+                    AppLocalizations.get('two_step_verification'),
+                    style: const TextStyle(
                       fontSize: 26,
                       fontWeight: FontWeight.w900,
                       color: Color(0xFF1A1A1A),
@@ -143,7 +161,7 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'Enter the 6-digit code sent to your email:\n${widget.userData['email']}',
+                    AppLocalizations.get('otp_email_msg').replaceFirst('{email}', widget.userData['email']),
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       fontSize: 14,
@@ -192,9 +210,9 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
                     ),
                     child: _isLoading
                         ? const CircularProgressIndicator(color: Colors.white)
-                        : const Text(
-                            'Verify & Login',
-                            style: TextStyle(
+                        : Text(
+                            AppLocalizations.get('verify_login'),
+                            style: const TextStyle(
                               color: Colors.white,
                               fontSize: 16,
                               fontWeight: FontWeight.w900,
@@ -203,28 +221,30 @@ class _Verify2FAScreenState extends State<Verify2FAScreen> {
                           ),
                   ),
                   const SizedBox(height: 24),
-                  TextButton(
-                    onPressed: _isLoading ? null : _handleResend,
-                    child: const Text(
-                      'Resend Code',
-                      style: TextStyle(
-                        color: Color(0xFF00BFA5),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
+                  if (MediaQuery.of(context).viewInsets.bottom == 0) ...[
+                    TextButton(
+                      onPressed: _isLoading ? null : _handleResend,
+                      child: Text(
+                        AppLocalizations.get('resend_code'),
+                        style: const TextStyle(
+                          color: Color(0xFF00BFA5),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text(
-                      'Back to Login',
-                      style: TextStyle(
-                        color: Color(0xFF757575),
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: Text(
+                        AppLocalizations.get('back_to_login'),
+                        style: const TextStyle(
+                          color: Color(0xFF757575),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ),

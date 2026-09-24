@@ -26,6 +26,7 @@ class LoginSecurityManager {
     if (lockoutUntil != null) {
       final now = DateTime.now().millisecondsSinceEpoch;
       if (now < lockoutUntil) {
+        debugPrint('[LOGIN] Account locked until: ${DateTime.fromMillisecondsSinceEpoch(lockoutUntil)}');
         return SecurityStatus(
           attempts: attempts,
           isLocked: true,
@@ -34,6 +35,7 @@ class LoginSecurityManager {
       } else {
         // Lockout expired, reset attempts (or keep them but allow login)
         // We'll reset them here to be clean
+        debugPrint('[LOGIN] Lock expired');
         await resetAttempts(username);
         return SecurityStatus(attempts: 0, isLocked: false);
       }
@@ -49,13 +51,19 @@ class LoginSecurityManager {
     final status = await checkStatus(username);
     final newAttempts = status.attempts + 1;
     
+    debugPrint('[LOGIN] Incorrect password');
+    debugPrint('[LOGIN] Failed attempts: $newAttempts');
+    debugPrint('[LOGIN] Remaining attempts: ${maxAttempts - newAttempts}');
+
     Map<String, dynamic> updates = {
       'failedAttempts': newAttempts,
       'lastFailedAttempt': ServerValue.timestamp,
     };
 
     if (newAttempts >= maxAttempts) {
-      updates['lockoutUntil'] = DateTime.now().add(lockoutDuration).millisecondsSinceEpoch;
+      final lockoutTime = DateTime.now().add(lockoutDuration);
+      updates['lockoutUntil'] = lockoutTime.millisecondsSinceEpoch;
+      debugPrint('[LOGIN] Account locked until: $lockoutTime');
     }
 
     await ref.update(updates);
@@ -66,6 +74,7 @@ class LoginSecurityManager {
 
   static Future<void> resetAttempts(String username) async {
     final key = _sanitizeKey(username);
+    debugPrint('[LOGIN] Successful login - attempts reset');
     await _database.ref('login_security').child(key).remove();
   }
 }

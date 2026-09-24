@@ -123,6 +123,15 @@ class AppLocalizations {
     'select_purok': 'Select Purok',
     'select_language': 'Select Language',
     'close': 'Close',
+    'welcome_name': 'Welcome Back, {name}!',
+    'complete_form_correctly': 'Please complete the form correctly',
+    'email_not_found': 'Email not found in our records',
+    'please_wait_opening': 'Please wait, opening the app...',
+    'splash_loading_portal': 'Please wait, opening the portal...',
+    'resident_desc': 'Join our waste management community',
+    'driver_desc': 'Official Service Partner Registration',
+    'purok_selection_desc': 'Please select the Purok where your residence is located.',
+    'language_selection_desc': 'Select your preferred language for the application.',
 
     // Loading & Status
     'verifying_email': 'Verifying Email...',
@@ -132,10 +141,33 @@ class AppLocalizations {
     'processing_registration': 'Processing Registration...',
     'processing': 'Processing...',
 
+    // 2FA & Lockout
+    'two_step_verification': 'Two-Step Verification',
+    'otp_email_msg': 'Enter the 6-digit code sent to your email:\n{email}',
+    'verify_login': 'Verify & Login',
+    'resend_code': 'Resend Code',
+    'enter_otp_code': 'Please enter the 6-digit code',
+    'verification_successful': 'Verification Successful!',
+    'err_otp_invalid': 'Invalid verification code',
+    'sending_code': 'Sending new code...',
+    'err_resend_failed': 'Failed to resend code',
+    'security_lockout': 'Security Lockout',
+    'err_lockout_msg': 'Login is temporarily disabled due to multiple failed attempts.',
+    'reset_password_link': 'Reset your password',
+    'reg_success': 'Registration successful!',
+    'reg_failed': 'Registration failed',
+    'new_reg_notif': '{name} has registered as a resident.',
+    'new_driver_reg_notif': '{name} has joined as a driver.',
+    'new_reg_title': 'New Registration',
+    'new_driver_reg_title': 'New Driver Registered',
+
     // Errors (Formal)
     'err_username_email': 'Please enter your username or email to continue.',
+    'err_username_reg': 'Username is required for registration.',
+    'err_email_req_reg': 'Email address is required for registration.',
+    'err_password_reg': 'Password is required for registration.',
     'err_password_req': 'Please enter your password to proceed.',
-    'err_auth_failed': 'Authentication failed. Please check your credentials.',
+    'err_auth_failed': 'Invalid username/email or password',
     'err_connection': 'Server connection error. Please ensure the backend services are operational.',
     'err_email_reg': 'Please enter your registered email address.',
     'err_email_format': 'Please enter a valid email format.',
@@ -159,6 +191,18 @@ class AppLocalizations {
     'err_terms_req': 'Please read and accept the Terms & Conditions.',
     'err_general': 'Please correct the highlighted errors to proceed.',
     'err_network': 'A network error occurred. Please check your internet connection and try again.',
+    'err_incorrect_password_attempts': 'Incorrect password. {attempts} attempts remaining.',
+    'err_account_locked_final': 'Too many incorrect password attempts. Your account is locked for 1 minute.',
+
+    // Permissions & Common
+    'permissions_required': 'Permissions Required',
+    'permissions_desc': 'To use the Garbage Tracker, you must enable Location Services and allow Notifications. This ensures real-time tracking and collection alerts work correctly.',
+    'open_settings': 'Open Settings',
+    'go_back': 'Go Back',
+    'retry_connection': 'Retry Connection',
+    'no_internet': 'No Internet Connection',
+    'brgy_footer': '© 2026 Brgy. Balintawak Lipa City',
+    'all_rights_reserved': 'All rights reserved',
   };
 
   static final Map<String, String> _filipino = {
@@ -227,6 +271,15 @@ class AppLocalizations {
     'select_purok': 'Pumili ng Purok',
     'select_language': 'Pumili ng Wika',
     'close': 'Isara',
+    'welcome_name': 'Maligayang Pagbabalik, {name}!',
+    'complete_form_correctly': 'Pakikumpleto ang form nang tama',
+    'email_not_found': 'Hindi nahanap ang email sa aming record',
+    'please_wait_opening': 'Pakihintay, binubuksan ang app...',
+    'splash_loading_portal': 'Pakihintay, binubuksan ang portal...',
+    'resident_desc': 'Sumali sa aming komunidad ng waste management',
+    'driver_desc': 'Opisyal na Rehistrasyon ng Service Partner',
+    'purok_selection_desc': 'Pakipili ang Purok kung saan matatagpuan ang iyong tirahan.',
+    'language_selection_desc': 'Piliin ang iyong gustong wika para sa aplikasyon.',
 
     // Loading & Status
     'verifying_email': 'Sini-verify ang Email...',
@@ -236,10 +289,33 @@ class AppLocalizations {
     'processing_registration': 'Pinoproseso ang Rehistrasyon...',
     'processing': 'Pinoproseso...',
 
+    // 2FA & Lockout
+    'two_step_verification': 'Two-Step na Pagpapatunay',
+    'otp_email_msg': 'Ipasok ang 6-digit code na ipinadala sa iyong email:\n{email}',
+    'verify_login': 'I-verify at Mag-login',
+    'resend_code': 'Ipadala Muli ang Code',
+    'enter_otp_code': 'Pakipasok ang 6-digit code',
+    'verification_successful': 'Matagumpay ang Pagpapatunay!',
+    'err_otp_invalid': 'Maling verification code',
+    'sending_code': 'Ipinapadala ang bagong code...',
+    'err_resend_failed': 'Nabigong ipadala muli ang code',
+    'security_lockout': 'Security Lockout',
+    'err_lockout_msg': 'Pansamantalang hindi pinagana ang login dahil sa maraming maling pagsubok.',
+    'reset_password_link': 'I-reset ang iyong password',
+    'reg_success': 'Matagumpay ang rehistrasyon!',
+    'reg_failed': 'Nabigo ang rehistrasyon',
+    'new_reg_notif': 'Si {name} ay nagparehistro bilang residente.',
+    'new_driver_reg_notif': 'Si {name} ay sumali bilang drayber.',
+    'new_reg_title': 'Bagong Rehistrasyon',
+    'new_driver_reg_title': 'Bagong Drayber na Rehistrado',
+
     // Errors
     'err_username_email': 'Pakipasok ang iyong username o email para magpatuloy.',
+    'err_username_reg': 'Kailangan ang username para sa rehistrasyon.',
+    'err_email_req_reg': 'Kailangan ang email para sa rehistrasyon.',
+    'err_password_reg': 'Kailangan ang password para sa rehistrasyon.',
     'err_password_req': 'Pakipasok ang iyong password para magpatuloy.',
-    'err_auth_failed': 'Nabigo ang pagpapatunay. Pakisuri ang iyong credentials.',
+    'err_auth_failed': 'Maling username/email o password',
     'err_connection': 'Error sa koneksyon ng server. Pakisuri kung operational ang backend.',
     'err_email_reg': 'Pakipasok ang iyong rehistradong email address.',
     'err_email_format': 'Pakipasok ang wastong format ng email.',
@@ -263,6 +339,18 @@ class AppLocalizations {
     'err_terms_req': 'Pakibasa at tanggapin ang Mga Tuntunin at Kundisyon.',
     'err_general': 'Pakitama ang mga highlight na error para magpatuloy.',
     'err_network': 'Nagkaroon ng network error. Pakisubukang muli mamaya.',
+    'err_incorrect_password_attempts': 'Maling password. {attempts} na pagsubok ang natitira.',
+    'err_account_locked_final': 'Masyadong maraming maling pagsubok. Ang iyong account ay naka-lock sa loob ng 1 minuto.',
+
+    // Permissions & Common
+    'permissions_required': 'Kailangan ng mga Permisyon',
+    'permissions_desc': 'Upang magamit ang Garbage Tracker, dapat mong paganahin ang Location Services at payagan ang Notifications. Tinitiyak nito na ang real-time tracking at mga alerto sa koleksyon ay gagana nang tama.',
+    'open_settings': 'Buksan ang Settings',
+    'go_back': 'Bumalik',
+    'retry_connection': 'Subukan Muli ang Koneksyon',
+    'no_internet': 'Walang Koneksyon sa Internet',
+    'brgy_footer': '© 2026 Brgy. Balintawak Lipa City',
+    'all_rights_reserved': 'Lahat ng karapatan ay reserbado',
   };
 
   static final Map<String, String> _bisaya = {
@@ -331,6 +419,15 @@ class AppLocalizations {
     'select_purok': 'Pilia ang Purok',
     'select_language': 'Pilia ang Pinulongan',
     'close': 'Isira',
+    'welcome_name': 'Maayong Pagbalik, {name}!',
+    'complete_form_correctly': 'Palihug kompletoha ang porma sa husto',
+    'email_not_found': 'Wala makit-i ang email sa among mga record',
+    'please_wait_opening': 'Palihug hulata, giablihan ang app...',
+    'splash_loading_portal': 'Palihug hulata, giablihan ang portal...',
+    'resident_desc': 'Apil sa among waste management nga komunidad',
+    'driver_desc': 'Opisyal nga Rehistrasyon sa Service Partner',
+    'purok_selection_desc': 'Palihug pilia ang Purok kung asa nahimutang ang imong balay.',
+    'language_selection_desc': 'Pilia ang imong gusto nga pinulongan para sa aplikasyon.',
 
     // Loading & Status
     'verifying_email': 'Sini-verify ang Email...',
@@ -340,10 +437,33 @@ class AppLocalizations {
     'processing_registration': 'Pinoproseso ang Rehistrasyon...',
     'processing': 'Pinoproseso...',
 
+    // 2FA & Lockout
+    'two_step_verification': 'Two-Step nga Pagmatuod',
+    'otp_email_msg': 'Isulod ang 6-digit code nga gipadala sa iyong email:\n{email}',
+    'verify_login': 'I-verify at Mag-login',
+    'resend_code': 'Ipadala Pag-usab ang Code',
+    'enter_otp_code': 'Palihug isulod ang 6-digit code',
+    'verification_successful': 'Malamposon ang Pagmatuod!',
+    'err_otp_invalid': 'Sayop nga verification code',
+    'sending_code': 'Gipadala ang bag-ong code...',
+    'err_resend_failed': 'Napakyas sa pagpadala pag-usab sa code',
+    'security_lockout': 'Security Lockout',
+    'err_lockout_msg': 'Temporaryong gi-disable ang login tungod sa daghang sayop nga pagsulay.',
+    'reset_password_link': 'I-reset ang imong password',
+    'reg_success': 'Malamposon ang rehistrasyon!',
+    'reg_failed': 'Napakyas ang rehistrasyon',
+    'new_reg_notif': 'Si {name} nagparehistro isip residente.',
+    'new_driver_reg_notif': 'Si {name} miapil isip drayber.',
+    'new_reg_title': 'Bag-ong Rehistrasyon',
+    'new_driver_reg_title': 'Bag-ong Drayber nga Rehistrado',
+
     // Errors
     'err_username_email': 'Palihug isulod ang imong username o email para mopadayon.',
+    'err_username_reg': 'Gikinahanglan ang username para sa rehistrasyon.',
+    'err_email_req_reg': 'Gikinahanglan ang email para sa rehistrasyon.',
+    'err_password_reg': 'Gikinahanglan ang password para sa rehistrasyon.',
     'err_password_req': 'Palihug isulod ang imong password para mopadayon.',
-    'err_auth_failed': 'Napakyas ang pagmatuod. Susiha ang imong mga detalye.',
+    'err_auth_failed': 'Sayop nga username/email o password',
     'err_connection': 'Error sa koneksyon sa server. Siguraduhon nga operational ang backend.',
     'err_email_reg': 'Palihug isulod ang imong rehistradong email address.',
     'err_email_format': 'Palihug isulod ang husto nga format sa email.',
@@ -367,5 +487,17 @@ class AppLocalizations {
     'err_terms_req': 'Palihug basaha ug dawata ang Mga Termino ug Kondisyon.',
     'err_general': 'Palihug taronga ang mga highlighted nga sayop para mopadayon.',
     'err_network': 'Adunay network error. Palihug sulayi pag-usab unya.',
+    'err_incorrect_password_attempts': 'Sayop nga password. {attempts} na lang ang nahabilin nga pagsulay.',
+    'err_account_locked_final': 'Daghan na kaayo ang sayop nga pagsulay. Ang imong account naka-lock sulod sa 1 ka minuto.',
+
+    // Permissions & Common
+    'permissions_required': 'Gikinahanglan ang mga Permiso',
+    'permissions_desc': 'Aron magamit ang Garbage Tracker, kinahanglan nimo i-enable ang Location Services ug tugutan ang Notifications. Kini magsiguro nga ang real-time tracking ug mga alerto sa koleksyon magtrabaho og husto.',
+    'open_settings': 'Ablihi ang Settings',
+    'go_back': 'Balik',
+    'retry_connection': 'Sulayi Pag-usab ang Koneksyon',
+    'no_internet': 'Walang Koneksyon sa Internet',
+    'brgy_footer': '© 2026 Brgy. Balintawak Lipa City',
+    'all_rights_reserved': 'Tanang katungod gigahin',
   };
 }

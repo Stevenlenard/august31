@@ -2,12 +2,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../utils/app_theme.dart';
 import '../api/api_service.dart';
-import '../api/api_client.dart';
 import '../widgets/legal_agreement_dialog.dart';
 import '../widgets/animated_auth_background.dart';
 import '../widgets/hover_action_button.dart';
 import '../widgets/fade_slide_entrance.dart';
 import '../utils/app_localizations.dart';
+import '../utils/route_persistence_manager.dart';
+import '../utils/responsive_text.dart';
+import '../utils/responsive.dart';
+import '../widgets/custom_snackbar.dart';
 
 class ForgotPasswordScreen extends StatefulWidget {
   const ForgotPasswordScreen({super.key});
@@ -44,11 +47,21 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   Timer? _otpTimer;
   int _timerSecondsRemaining = 180; // 3 minutes
   bool _canResend = false;
+  final Map<String, Timer?> _errorTimers = {};
 
   @override
   void initState() {
     super.initState();
+    RoutePersistenceManager.saveLastRoute('/forgot_password');
+    _loadState();
     AppLocalizations.currentLanguage.addListener(_onLanguageChanged);
+    
+    // Real-time listeners
+    _emailController.addListener(_onEmailChanged);
+    _otpController.addListener(_onOtpChanged);
+    _passwordController.addListener(_onPasswordChanged);
+    _confirmPasswordController.addListener(_onConfirmPasswordChanged);
+
     _emailFocus.addListener(() => setState(() {}));
     _otpFocus.addListener(() => setState(() {}));
     _passwordFocus.addListener(() { 
@@ -65,8 +78,38 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     if (mounted) setState(() {});
   }
 
+  void _onEmailChanged() {
+    if (_emailError != null) {
+      setState(() => _emailError = null);
+    }
+  }
+
+  void _onOtpChanged() {
+    if (_otpError != null) {
+      setState(() => _otpError = null);
+    }
+  }
+
+  void _onPasswordChanged() {
+    if (_passwordError != null) {
+      setState(() => _passwordError = null);
+    }
+  }
+
+  void _onConfirmPasswordChanged() {
+    if (_confirmPasswordError != null) {
+      setState(() => _confirmPasswordError = null);
+    }
+  }
+
   @override
   void dispose() {
+    _errorTimers.forEach((_, timer) => timer?.cancel());
+    _emailController.removeListener(_onEmailChanged);
+    _otpController.removeListener(_onOtpChanged);
+    _passwordController.removeListener(_onPasswordChanged);
+    _confirmPasswordController.removeListener(_onConfirmPasswordChanged);
+
     _emailFocus.dispose();
     _otpFocus.dispose();
     _passwordFocus.dispose();
@@ -74,6 +117,54 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     _otpTimer?.cancel();
     AppLocalizations.currentLanguage.removeListener(_onLanguageChanged);
     super.dispose();
+  }
+
+  Future<void> _loadState() async {
+    final state = await RoutePersistenceManager.getForgotPasswordState();
+    if (state != null && mounted) {
+      setState(() {
+        _currentStep = state['step'];
+        _emailController.text = state['email'];
+      });
+      if (_currentStep == 2) _startOtpTimer();
+    }
+  }
+
+  void _saveState() {
+    RoutePersistenceManager.saveForgotPasswordState(_currentStep, _emailController.text.trim());
+  }
+
+  void _setErrorWithTimer(String field, String? errorKey) {
+    setState(() {
+      if (field == 'email') _emailError = errorKey;
+      if (field == 'otp') _otpError = errorKey;
+      if (field == 'password') _passwordError = errorKey;
+      if (field == 'confirmPassword') _confirmPasswordError = errorKey;
+    });
+
+    _errorTimers[field]?.cancel();
+    if (errorKey != null) {
+      _errorTimers[field] = Timer(const Duration(seconds: 15), () {
+        if (mounted) {
+          setState(() {
+            if (field == 'email') _emailError = null;
+            if (field == 'otp') _otpError = null;
+            if (field == 'password') _passwordError = null;
+            if (field == 'confirmPassword') _confirmPasswordError = null;
+          });
+        }
+      });
+    }
+  }
+
+  void _clearAllErrors() {
+    _errorTimers.forEach((_, timer) => timer?.cancel());
+    setState(() {
+      _emailError = null;
+      _otpError = null;
+      _passwordError = null;
+      _confirmPasswordError = null;
+    });
   }
 
   void _startOtpTimer() {
@@ -108,33 +199,33 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   void _validateEmail() {
     final val = _emailController.text.trim();
     if (val.isEmpty) {
-      setState(() => _emailError = AppLocalizations.get('err_email_reg'));
+      _setErrorWithTimer('email', 'err_email_reg');
     } else if (!RegExp(r'^[\w-.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(val)) {
-      setState(() => _emailError = AppLocalizations.get('err_email_format'));
+      _setErrorWithTimer('email', 'err_email_format');
     } else {
-      setState(() => _emailError = null);
+      _setErrorWithTimer('email', null);
     }
   }
 
   void _validateOtp() {
     final val = _otpController.text;
     if (val.isEmpty) {
-      setState(() => _otpError = AppLocalizations.get('err_otp_req'));
+      _setErrorWithTimer('otp', 'err_otp_req');
     } else if (val.length < 6) {
-      setState(() => _otpError = AppLocalizations.get('err_otp_len'));
+      _setErrorWithTimer('otp', 'err_otp_len');
     } else if (_timerSecondsRemaining <= 0) {
-      setState(() => _otpError = AppLocalizations.get('err_otp_expired'));
+      _setErrorWithTimer('otp', 'err_otp_expired');
     } else {
-      setState(() => _otpError = null);
+      _setErrorWithTimer('otp', null);
     }
   }
 
   void _validatePassword() {
     final val = _passwordController.text;
     if (val.isEmpty) {
-      setState(() => _passwordError = AppLocalizations.get('err_pass_new'));
+      _setErrorWithTimer('password', 'err_password_reg');
     } else if (val.length < 6) {
-      setState(() => _passwordError = AppLocalizations.get('err_pass_len'));
+      _setErrorWithTimer('password', 'err_pass_len');
     } else {
       bool hasUpper = val.contains(RegExp(r'[A-Z]'));
       bool hasLower = val.contains(RegExp(r'[a-z]'));
@@ -142,66 +233,101 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       bool hasSpecial = val.contains(RegExp(r'[!@#$%^&*(),.?":{}|<>]'));
 
       if (!hasUpper || !hasLower || !hasDigit || !hasSpecial) {
-        setState(() => _passwordError = AppLocalizations.get('err_pass_complex'));
+        _setErrorWithTimer('password', 'err_pass_complex');
       } else {
-        setState(() => _passwordError = null);
+        _setErrorWithTimer('password', null);
       }
     }
   }
 
   void _validateConfirmPassword() {
     if (_confirmPasswordController.text != _passwordController.text) {
-      setState(() => _confirmPasswordError = AppLocalizations.get('err_pass_match'));
+      _setErrorWithTimer('confirmPassword', 'err_pass_match');
     } else {
-      setState(() => _confirmPasswordError = null);
+      _setErrorWithTimer('confirmPassword', null);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double screenHeight = MediaQuery.of(context).size.height;
+    final double keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
+    final bool isMobile = Responsive.isMobile(context);
+
     return AnimatedAuthBackground(
-      child: SafeArea(
-        child: ScrollConfiguration(
-          behavior: const ScrollBehavior().copyWith(scrollbars: false),
-          child: CustomScrollView(
-            physics: const BouncingScrollPhysics(),
-            slivers: [
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      resizeToAvoidBottomInset: false,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        resizeToAvoidBottomInset: false,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              // Main Scrollable Content
+              Positioned.fill(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: screenHeight * 0.02,
+                  ),
                   child: Column(
                     children: [
-                      FadeSlideEntrance(
-                        delay: const Duration(milliseconds: 100),
-                        child: _buildHeader(),
-                      ),
-                      const Spacer(flex: 2),
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 400),
+                      // Header inside scroll (fixed top space)
+                      _buildHeader(),
+                      
+                      Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: screenWidth > 600 ? screenWidth * 0.08 : 0,
+                        ),
                         child: Column(
                           children: [
+                            SizedBox(height: screenHeight * 0.08),
+                            _buildBranding(),
+                            SizedBox(height: screenHeight * 0.03),
+
                             FadeSlideEntrance(
-                              delay: const Duration(milliseconds: 300),
-                              child: _buildBranding(),
+                              key: const ValueKey('forgot_password_main_card'),
+                              delay: const Duration(milliseconds: 200),
+                              child: Center(
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(maxWidth: 450),
+                                  child: _buildMainCard(screenWidth, screenHeight),
+                                ),
+                              ),
                             ),
-                            const SizedBox(height: 32),
-                            FadeSlideEntrance(
-                              delay: const Duration(milliseconds: 500),
-                              child: _buildMainCard(),
-                            ),
+
+                            // Footer inside scroll for Web/Tablet
+                            if (!isMobile) ...[
+                              const SizedBox(height: 60),
+                              _buildFooter(),
+                              const SizedBox(height: 20),
+                            ],
                           ],
                         ),
                       ),
-                      const Spacer(flex: 4),
-                      FadeSlideEntrance(
-                        delay: const Duration(milliseconds: 700),
-                        child: _buildFooter(),
-                      ),
+
+                      // Spacer for the keyboard
+                      SizedBox(height: keyboardHeight),
+
+                      // Extra buffer for mobile fixed footer
+                      if (isMobile && keyboardHeight == 0) const SizedBox(height: 120),
                     ],
                   ),
                 ),
               ),
+
+              // Fixed Footer for Mobile
+              if (isMobile)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 20,
+                  child: FadeSlideEntrance(
+                    delay: const Duration(milliseconds: 700),
+                    child: _buildFooter(),
+                  ),
+                ),
             ],
           ),
         ),
@@ -210,105 +336,188 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   }
 
   Widget _buildHeader() {
-    return Row(
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white.withAlpha(150),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: IconButton(
-            icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Color(0xFF00796B), size: 20),
-            onPressed: () {
-              if (_currentStep > 1) {
-                setState(() {
-                  _currentStep--;
-                  _emailError = null;
-                  _otpError = null;
-                  _passwordError = null;
-                  _confirmPasswordError = null;
-                  if (_currentStep == 1) _otpTimer?.cancel();
-                });
-              } else {
-                Navigator.pop(context);
-              }
-            },
-          ),
-        ),
-        const SizedBox(width: 16),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              _currentStep == 1 ? AppLocalizations.get('verification') : (_currentStep == 2 ? AppLocalizations.get('enter_token') : AppLocalizations.get('new_password')),
-              style: const TextStyle(
-                color: AppColors.tealText,
-                fontSize: 28,
-                fontWeight: FontWeight.w900,
-                letterSpacing: -1,
-                height: 1,
+    final bool isWide = Responsive.isTablet(context) || Responsive.isDesktop(context);
+    return Padding(
+      padding: EdgeInsets.only(
+        top: 10, 
+        bottom: 0,
+        left: isWide ? 0 : 0, // Using the parent's padding of 24
+        right: isWide ? 0 : 0,
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white.withAlpha(200),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withAlpha(20), blurRadius: 4, offset: const Offset(0, 2))
+                  ]
+                ),
+                child: IconButton(
+                  icon: Icon(Icons.arrow_back_ios_new_rounded, color: const Color(0xFF00796B), size: ResponsiveText.getIconSize(context, 20)),
+                  onPressed: () {
+                    if (_currentStep > 1) {
+                      _clearAllErrors();
+                      setState(() {
+                        _currentStep--;
+                        if (_currentStep == 1) _otpTimer?.cancel();
+                      });
+                      _saveState();
+                    } else {
+                      _clearAllErrors();
+                      RoutePersistenceManager.clearForgotPasswordState();
+                      RoutePersistenceManager.clearLastRoute();
+                      Navigator.pop(context);
+                    }
+                  },
+                ),
               ),
-            ),
-            Text(
-              AppLocalizations.get('account_recovery'),
-              style: const TextStyle(
-                color: AppColors.textGray,
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.5,
+              const SizedBox(width: 16),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                   Text(
+                    _currentStep == 1 ? AppLocalizations.get('verification') : (_currentStep == 2 ? AppLocalizations.get('enter_token') : AppLocalizations.get('new_password')),
+                    style: ResponsiveText.screenHeader(context),
+                  ),
+                  Text(
+                    AppLocalizations.get('account_recovery'),
+                    style: TextStyle(
+                      color: AppColors.textGray, 
+                      fontSize: ResponsiveText.getFontSize(context, 13), 
+                      fontWeight: FontWeight.w500
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
-      ],
+            ],
+          ),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(color: AppColors.tealText.withAlpha(30), shape: BoxShape.circle),
+            child: Icon(Icons.security_rounded, color: AppColors.tealText, size: ResponsiveText.getIconSize(context, 28)),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildBranding() {
     IconData icon = Icons.lock_reset_rounded;
-    if (_currentStep == 2) icon = Icons.vibration_rounded;
-    if (_currentStep == 3) icon = Icons.security_rounded;
+    String brandingText = "Identity Verification";
+    if (_currentStep == 2) {
+      icon = Icons.vibration_rounded;
+      brandingText = "Security Authentication";
+    }
+    if (_currentStep == 3) {
+      icon = Icons.security_rounded;
+      brandingText = "Password Restoration";
+    }
 
-    String mainTitle = AppLocalizations.get('verification');
-    if (_currentStep == 2) mainTitle = AppLocalizations.get('enter_token');
-    if (_currentStep == 3) mainTitle = AppLocalizations.get('new_password');
+    final double containerSize = ResponsiveText.getIconSize(context, 80);
+    final double iconSize = ResponsiveText.getIconSize(context, 40);
 
     return Column(
       children: [
-        Container(
-          width: 84,
-          height: 84,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [AppColors.loginButtonStart, AppColors.loginButtonEnd],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
-                color: AppColors.loginButtonEnd.withAlpha(60),
-                blurRadius: 20,
-                offset: const Offset(0, 8),
+        Hero(
+          tag: 'app_logo',
+          flightShuttleBuilder: (flightContext, animation, flightDirection, fromHeroContext, toHeroContext) {
+            final Hero fromHero = fromHeroContext.widget as Hero;
+            final Hero toHero = toHeroContext.widget as Hero;
+            final Widget fromChild = fromHero.child;
+            final Widget toChild = toHero.child;
+
+            return AnimatedBuilder(
+              animation: animation,
+              builder: (context, child) {
+                final double scale = 1.0 + (0.1 * (1.0 - (animation.value - 0.5).abs() * 2));
+                final double rotation = (flightDirection == HeroFlightDirection.push ? 1 : -1) * 
+                                      (1.0 - animation.value) * 0.2;
+                
+                return Transform.scale(
+                  scale: scale,
+                  child: Transform.rotate(
+                    angle: rotation,
+                    child: Material(
+                      type: MaterialType.transparency,
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Opacity(
+                            opacity: (1.0 - animation.value).clamp(0.0, 1.0),
+                            child: fromChild,
+                          ),
+                          Opacity(
+                            opacity: animation.value.clamp(0.0, 1.0),
+                            child: toChild,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+          child: Container(
+            width: containerSize,
+            height: containerSize,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [AppColors.loginButtonStart, AppColors.loginButtonEnd],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
-            ],
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: AppColors.loginButtonEnd.withAlpha(60),
+                  blurRadius: 20,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 300),
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: ScaleTransition(scale: animation, child: child),
+              ),
+              child: Icon(
+                icon, 
+                key: ValueKey(icon),
+                size: iconSize, 
+                color: Colors.white
+              ),
+            ),
           ),
-          child: Icon(icon, size: 44, color: Colors.white),
         ),
-        const SizedBox(height: 24),
-        Text(mainTitle, style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: AppColors.tealText, letterSpacing: -1.2)),
+        const SizedBox(height: 16),
         Text(
-          AppLocalizations.get('account_recovery'),
-          style: const TextStyle(fontSize: 16, color: AppColors.textGray, fontWeight: FontWeight.w600, letterSpacing: 0.5),
+          brandingText,
+          textAlign: TextAlign.center,
+          style: ResponsiveText.brandingTitle(context),
+        ),
+        Text(
+          _currentStep == 1 ? AppLocalizations.get('step_1_verify') : (_currentStep == 2 ? AppLocalizations.get('step_2_token') : AppLocalizations.get('step_3_secure')),
+          textAlign: TextAlign.center,
+          style: ResponsiveText.brandingSubtitle(context),
         ),
       ],
     );
   }
 
-  Widget _buildMainCard() {
+  Widget _buildMainCard(double screenWidth, double screenHeight) {
     return Container(
-      padding: const EdgeInsets.all(28),
-      decoration: AppDecorations.authCardDecoration(), // Applied High-Depth Shadow
+      padding: EdgeInsets.symmetric(
+        horizontal: screenWidth > 600 ? 32 : 24, 
+        vertical: screenHeight * 0.03,
+      ),
+      decoration: AppDecorations.authCardDecoration(),
       child: Form(
         key: _formKey,
         child: Column(
@@ -369,14 +578,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 8),
-          child: Text(
-            AppLocalizations.get('email_address'),
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.inputLabel, letterSpacing: 0.2),
-          ),
-        ),
         _buildRefinedTextField(
+          label: AppLocalizations.get('email_address'),
           controller: _emailController,
           focus: _emailFocus,
           hint: AppLocalizations.get('enter_reg_email'),
@@ -401,7 +604,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
               padding: const EdgeInsets.only(left: 4, bottom: 8),
               child: Text(
                 AppLocalizations.get('verification_token'),
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.inputLabel, letterSpacing: 0.2),
+                style: ResponsiveText.inputLabel(context),
               ),
             ),
             if (_timerSecondsRemaining > 0)
@@ -409,16 +612,13 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                 padding: const EdgeInsets.only(bottom: 8, right: 4),
                 child: Text(
                   '${AppLocalizations.get('expires_in')}: ${_formatTimer(_timerSecondsRemaining)}',
-                  style: TextStyle(
-                    fontSize: 12, 
-                    fontWeight: FontWeight.bold, 
-                    color: isCritical ? Colors.redAccent : (isUrgent ? Colors.orange.shade800 : AppColors.textGray)
-                  ),
+                  style: ResponsiveText.body(context, color: isCritical ? Colors.redAccent : (isUrgent ? Colors.orange.shade800 : AppColors.textGray)).copyWith(fontWeight: FontWeight.bold, fontSize: 12),
                 ),
               ),
           ],
         ),
         _buildRefinedTextField(
+          label: "", // Already handled in Row
           controller: _otpController,
           focus: _otpFocus,
           hint: '000000',
@@ -443,14 +643,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 8),
-          child: Text(
-            AppLocalizations.get('new_password'),
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.inputLabel, letterSpacing: 0.2),
-          ),
-        ),
         _buildRefinedTextField(
+          label: AppLocalizations.get('new_password'),
           controller: _passwordController,
           focus: _passwordFocus,
           hint: AppLocalizations.get('enter_password'),
@@ -461,14 +655,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           onTogglePassword: () => setState(() => _obscurePassword = !_obscurePassword),
         ),
         const SizedBox(height: 24),
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 8),
-          child: Text(
-            AppLocalizations.get('confirm_password'),
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.inputLabel, letterSpacing: 0.2),
-          ),
-        ),
         _buildRefinedTextField(
+          label: AppLocalizations.get('confirm_password'),
           controller: _confirmPasswordController,
           focus: _confirmPasswordFocus,
           hint: AppLocalizations.get('confirm_your_password'),
@@ -481,11 +669,14 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     );
   }
 
-  Widget _buildRefinedTextField({required TextEditingController controller, required FocusNode focus, required String hint, required IconData icon, String? error, bool isPassword = false, bool obscureText = false, VoidCallback? onTogglePassword, TextInputType? keyboardType, int? maxLength, bool isOtp = false}) {
+  Widget _buildRefinedTextField({required String label, required TextEditingController controller, required FocusNode focus, required String hint, required IconData icon, String? error, bool isPassword = false, bool obscureText = false, VoidCallback? onTogglePassword, TextInputType? keyboardType, int? maxLength, bool isOtp = false}) {
     bool hasFocus = focus.hasFocus;
+    String? localizedError = error != null ? AppLocalizations.get(error) : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (label.isNotEmpty)
+          Padding(padding: const EdgeInsets.only(left: 4, bottom: 6), child: Text(label, style: ResponsiveText.inputLabel(context))),
         AnimatedContainer(
           duration: const Duration(milliseconds: 300),
           decoration: BoxDecoration(
@@ -517,12 +708,12 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
               counterText: "",
               hintText: hint,
               hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14, fontWeight: FontWeight.w400, letterSpacing: isOtp ? 0 : null),
-              prefixIcon: icon != null ? Icon(icon, color: hasFocus ? AppColors.tealText : AppColors.tealText.withAlpha(150), size: 20) : null,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+              prefixIcon: Icon(icon, color: hasFocus ? AppColors.tealText : AppColors.tealText.withAlpha(150), size: ResponsiveText.getIconSize(context, 20)),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
               filled: true,
               fillColor: hasFocus ? Colors.white : Colors.grey.shade50,
-              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: error != null ? Colors.redAccent : Colors.grey.shade200, width: 1.2)),
-              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: error != null ? Colors.redAccent : AppColors.tealText, width: 2.0)),
+              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: localizedError != null ? Colors.redAccent : Colors.grey.shade200, width: 1.2)),
+              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: localizedError != null ? Colors.redAccent : AppColors.tealText, width: 2.0)),
               suffixIcon: isPassword ? IconButton(
                 icon: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 300),
@@ -533,10 +724,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             ),
           ),
         ),
-        if (error != null)
+        if (localizedError != null)
           Padding(
-            padding: const EdgeInsets.only(top: 6, left: 4),
-            child: Text(error, style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.w600)),
+            padding: const EdgeInsets.only(top: 4, left: 4),
+            child: Text(localizedError, style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.w600)),
           ),
       ],
     );
@@ -563,9 +754,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       if (response.data['success'] == true) {
         _showSuccess(response.data['message'] ?? AppLocalizations.get('verifying_email'));
         setState(() => _currentStep = 2);
+        _saveState();
         _startOtpTimer();
       } else {
-        setState(() => _emailError = AppLocalizations.get('err_email_taken'));
+        setState(() => _emailError = response.data['message'] ?? AppLocalizations.get('email_not_found'));
       }
     } catch (e) {
       _showConnectionError();
@@ -602,6 +794,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       if (response.data['success'] == true) {
         _showSuccess(AppLocalizations.get('checking_token'));
         setState(() => _currentStep = 3);
+        _saveState();
         _otpTimer?.cancel();
       } else {
         setState(() => _otpError = AppLocalizations.get('err_otp_req'));
@@ -623,6 +816,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       );
       if (response.data['success'] == true) {
         _showSuccess(AppLocalizations.get('updating_password'));
+        RoutePersistenceManager.clearForgotPasswordState();
+        RoutePersistenceManager.clearLastRoute();
         Future.delayed(const Duration(seconds: 2), () {
           if (mounted) Navigator.pop(context);
         });
@@ -638,22 +833,20 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
 
   void _showSuccess(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.green));
+    CustomSnackBar.show(context, message: msg);
   }
 
   void _showError(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.redAccent));
+    CustomSnackBar.show(context, message: msg, isError: true);
   }
 
   void _showConnectionError() {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(AppLocalizations.get('err_network')),
-        backgroundColor: Colors.redAccent,
-        duration: const Duration(seconds: 5),
-      ),
+    CustomSnackBar.show(
+      context,
+      message: AppLocalizations.get('err_network'),
+      isError: true,
     );
   }
 
@@ -665,19 +858,25 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           spacing: 16,
           children: [
             _HoverZoomLink(
-              onTap: () => LegalAgreementDialog.show(context, isTerms: true),
-              child: Text(AppLocalizations.get('terms_conditions'), style: const TextStyle(color: AppColors.tealLink, fontSize: 12, fontWeight: FontWeight.bold, decoration: TextDecoration.underline)),
+              onTap: () {
+                _clearAllErrors();
+                LegalAgreementDialog.show(context, isTerms: true);
+              },
+              child: Text(AppLocalizations.get('terms_conditions'), style: ResponsiveText.footer(context, bold: true).copyWith(decoration: TextDecoration.underline)),
             ),
-            const Text('•', style: TextStyle(color: AppColors.textGray)),
+            Text('•', style: ResponsiveText.footer(context)),
             _HoverZoomLink(
-              onTap: () => LegalAgreementDialog.show(context, isTerms: false),
-              child: Text(AppLocalizations.get('privacy_policy'), style: const TextStyle(color: AppColors.tealLink, fontSize: 12, fontWeight: FontWeight.bold, decoration: TextDecoration.underline)),
+              onTap: () {
+                _clearAllErrors();
+                LegalAgreementDialog.show(context, isTerms: false);
+              },
+              child: Text(AppLocalizations.get('privacy_policy'), style: ResponsiveText.footer(context, bold: true).copyWith(decoration: TextDecoration.underline)),
             ),
           ],
         ),
         const SizedBox(height: 16),
-        const Text('© 2026 Brgy. Balintawak Lipa City', style: TextStyle(color: Color(0xFF00796B), fontSize: 12, fontWeight: FontWeight.bold)),
-        const Text('All rights reserved', style: TextStyle(color: Color(0xFF00796B), fontSize: 10)),
+        Text(AppLocalizations.get('brgy_footer'), style: ResponsiveText.footer(context, bold: true)),
+        Text(AppLocalizations.get('all_rights_reserved'), style: ResponsiveText.footer(context, size: 10)),
       ],
     );
   }

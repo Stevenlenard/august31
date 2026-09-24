@@ -128,6 +128,14 @@ class ApiService {
     }));
   }
 
+  Future<Response> verifyPassword(int id, String role, String password) async {
+    return await _dio.post('verify_password.php', data: FormData.fromMap({
+      'id': id,
+      'role': role,
+      'password': password,
+    }));
+  }
+
   Future<Response> forgotPassword(String email) async {
     return await _dio.post('forgot_password.php', data: {
       'email': email,
@@ -172,16 +180,16 @@ class ApiService {
   }
 
   Future<Response> deleteComplaint(int id) async {
-    return await _dio.post('delete_complaint.php', data: FormData.fromMap({
+    return await _dio.post('delete_complaint.php', data: {
       'complaint_id': id,
       'action': 'delete',
-    }));
+    });
   }
 
   Future<Response> bulkDeleteComplaints(List<int> ids) async {
-    return await _dio.post('bulk_delete_complaints.php', data: FormData.fromMap({
+    return await _dio.post('bulk_delete_complaints.php', data: {
       'complaint_ids': ids.join(','),
-    }));
+    });
   }
 
   Future<Response> archiveComplaint(int id, bool archive) async {
@@ -218,15 +226,19 @@ class ApiService {
   // --- User Validation ---
 
   Future<Response> checkUsername(String username) async {
-    return await _dio.get('check_availability.php', queryParameters: {'type': 'username', 'value': username});
+    return await _dio.post('check_username.php', data: FormData.fromMap({'username': username}));
   }
 
   Future<Response> checkEmail(String email) async {
-    return await _dio.get('check_availability.php', queryParameters: {'type': 'email', 'value': email});
+    return await _dio.post('check_email.php', data: FormData.fromMap({'email': email}));
   }
 
   Future<Response> checkPhone(String phone) async {
-    return await _dio.get('check_availability.php', queryParameters: {'type': 'phone', 'value': phone});
+    return await _dio.post('check_phone.php', data: FormData.fromMap({'phone': phone}));
+  }
+
+  Future<Response> checkTruck(String truckId) async {
+    return await _dio.post('check_truck.php', data: FormData.fromMap({'truck_id': truckId}));
   }
 
   // --- Profile Management ---
@@ -236,6 +248,7 @@ class ApiService {
     required String role,
     required String name,
     required String phone,
+    String? username,
     String? email,
     String? address,
     String? purok,
@@ -249,6 +262,7 @@ class ApiService {
       'name': name,
       'phone': phone,
     };
+    if (username != null) data['username'] = username;
     if (email != null) data['email'] = email;
     if (address != null) data['address'] = address;
     if (purok != null) data['purok'] = purok;
@@ -256,7 +270,11 @@ class ApiService {
     if (licenseNumber != null) data['license_number'] = licenseNumber;
     if (profilePicture != null) data['profile_picture'] = profilePicture;
 
-    return await _dio.post('update_profile.php', data: FormData.fromMap(data));
+    return await _dio.post('update_user_profile.php', data: FormData.fromMap(data));
+  }
+
+  Future<Response> checkAvailability(String type, String value) async {
+    return await _dio.get('check_availability.php', queryParameters: {'type': type, 'value': value});
   }
 
   Future<Response> uploadProfilePicture({

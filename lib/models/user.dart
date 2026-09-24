@@ -68,10 +68,9 @@ class UserData {
   String? get profilePictureUrl {
     if (profilePicture == null || profilePicture!.isEmpty) return null;
     
-    // If it's already a full URL, just add a timestamp for cache busting
+    // If it's already a full URL, just return it.
     if (profilePicture!.startsWith('http')) {
-      String separator = profilePicture!.contains('?') ? '&' : '?';
-      return "$profilePicture${separator}t=${DateTime.now().millisecondsSinceEpoch}";
+      return profilePicture;
     }
     
     // Fallback: build URL if database somehow has relative path

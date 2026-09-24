@@ -77,17 +77,38 @@ if (!empty($identifier) && !empty($password)) {
                     $mail->Port       = SMTP_PORT;
                     $mail->setFrom(SMTP_FROM, SMTP_NAME);
                     $mail->addAddress($user['email']);
+
                     $mail->isHTML(true);
-                    $mail->Subject = 'Your 2FA Verification Code - Garbage Tracker';
+                    $mail->Subject = '2FA Verification Code - Garbage Tracker';
                     $mail->Body    = "
-                        <div style='font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd;'>
-                            <h2 style='color: #2e7d32;'>Security Verification</h2>
-                            <p>Hello <strong>{$user['name']}</strong>,</p>
-                            <p>Your verification code is:</p>
-                            <div style='background: #f1f8e9; padding: 15px; font-size: 28px; font-weight: bold; text-align: center; letter-spacing: 10px; color: #2e7d32;'>
-                                $otp
+                        <div style='font-family: \"Segoe UI\", Tahoma, Geneva, Verdana, sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #e0f2f1; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05);'>
+                            <div style='background-color: #00796B; padding: 25px; text-align: center;'>
+                                <h1 style='color: #ffffff; margin: 0; font-size: 24px; letter-spacing: 1px;'>Garbage Tracker</h1>
+                                <p style='color: #b2dfdb; margin: 5px 0 0 0; font-size: 14px;'>Two-Factor Authentication | Pagpapatunay ng Account</p>
                             </div>
-                            <p>This code will expire in 5 minutes.</p>
+                            <div style='padding: 30px; background-color: #ffffff;'>
+                                <p style='color: #1a1a1a; font-weight: bold; font-size: 16px; margin-top: 0;'>Hello {$user['name']},</p>
+                                <p style='color: #757575; line-height: 1.6; font-size: 14px;'>Use the following verification code to complete your sign-in process.</p>
+
+                                <hr style='border: 0; border-top: 1px dashed #e0e0e0; margin: 20px 0;'>
+                                <p style='color: #757575; line-height: 1.6; font-size: 14px;'>Gamitin ang sumusunod na verification code para makumpleto ang iyong pag-login.</p>
+
+                                <div style='background-color: #f5f5f5; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0;'>
+                                    <span style='display: block; color: #757575; font-size: 11px; margin-bottom: 8px; text-transform: uppercase; font-weight: bold;'>Verification Code | Kodigo sa Pagpapatunay</span>
+                                    <span style='color: #00796B; font-size: 36px; font-weight: 900; letter-spacing: 8px; font-family: monospace;'>$otp</span>
+                                </div>
+
+                                <div style='background-color: #fff9c4; border-left: 4px solid #fbc02d; padding: 12px 15px; margin-bottom: 20px;'>
+                                    <p style='color: #5d4037; margin: 0; font-size: 13px;'><strong>Note:</strong> Valid for <strong>3 minutes</strong> only.</p>
+                                    <p style='color: #5d4037; margin: 5px 0 0 0; font-size: 13px;'><strong>Paalala:</strong> Valid ito sa loob ng <strong>3 minuto</strong> lamang.</p>
+                                </div>
+
+                                <p style='color: #9e9e9e; font-size: 12px; line-height: 1.5;'>If you did not request this, please secure your account. | Kung hindi mo ito hiniling, mangyaring i-secure ang iyong account.</p>
+                            </div>
+                            <div style='background-color: #fafafa; padding: 20px; text-align: center; border-top: 1px solid #eeeeee;'>
+                                <p style='color: #00796B; margin: 0; font-size: 12px; font-weight: bold;'>Brgy. Balintawak, Lipa City</p>
+                                <p style='color: #9e9e9e; margin: 5px 0 0 0; font-size: 11px;'>&copy; 2026 Garbage Tracker System. All rights reserved.</p>
+                            </div>
                         </div>
                     ";
                     $mail->send();

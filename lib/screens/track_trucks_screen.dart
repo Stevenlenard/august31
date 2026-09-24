@@ -4,9 +4,16 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:firebase_database/firebase_database.dart';
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size;
+import 'package:intl/intl.dart';
+import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size, Visibility;
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:geolocator/geolocator.dart' as geo;
+import '../utils/app_theme.dart';
+import '../widgets/fade_slide_entrance.dart';
+import '../utils/custom_notification.dart';
+import '../widgets/custom_snackbar.dart';
+import '../utils/prediction_engine.dart';
+import '../services/truck_assignment_service.dart';
 
 class TrackTrucksScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -17,14 +24,19 @@ class TrackTrucksScreen extends StatefulWidget {
   State<TrackTrucksScreen> createState() => _TrackTrucksScreenState();
 }
 
-class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
+class _TrackTrucksScreenState extends State<TrackTrucksScreen> with TickerProviderStateMixin {
   final FirebaseDatabase _database = FirebaseDatabase.instance;
   MapboxMap? mapboxMap;
   List<Map<dynamic, dynamic>> _trucks = [];
+  Map<String, dynamic> _allTrucksRegistry = {};
+  Map<String, dynamic> _liveLocations = {};
+  
   String? _selectedTruckId;
   String? _followedTruckId;
 
   PointAnnotationManager? _pointAnnotationManager;
+  final Map<String, PointAnnotation> _truckMarkers = {};
+  bool _managersReady = false;
 
   final Map<String, StreamSubscription> _sharedRouteSubscriptions = {};
   final Map<String, String> _truckPlates = {}; // Cache for plate numbers
@@ -32,19 +44,108 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
   StreamSubscription? _trucksMetaSubscription;
   StreamSubscription? _usersSubscription;
 
-  final Map<String, List<Map<String, dynamic>>> _webSharedRouteData = {}; 
-  final Map<String, List<Offset>> _webSharedRoutePixels = {}; 
-  final Map<String, Offset> _webStartPositions = {};
   final Map<String, List<Map<dynamic, dynamic>>> _lastRoutePoints = {}; 
   final Set<String> _visiblePaths = {};
   final Map<String, Position?> _sessionStartPoints = {};
 
-  final Map<String, List<Map<String, dynamic>>> _webHeatmapData = {}; 
-  final Map<String, List<Offset>> _webHeatmapPixels = {}; 
-  final Map<String, List<Offset>> _webOptimizedPixels = {};
+  bool _truckLayersCreated = false;
+  bool _isFollowLocked = false;
+  bool _isMapActive = false;
+  bool _isTargetActive = false;
+  bool _isFleetPanelVisible = true;
+  final Position _balintawakCenter = Position(121.1623, 13.9413);
 
-  // For Web Marker UI
-  Map<String, Offset> _webMarkerPositions = {};
+  // Animation for Header Circles & Pulse Effect
+  late AnimationController _circleController;
+  late AnimationController _refreshRotationController;
+  Timer? _pulseTimer;
+  double _pulseRadius = 8.0;
+  double _pulseOpacity = 0.5;
+  double _pulseRadius2 = 8.0; 
+  double _pulseOpacity2 = 0.3;
+  bool _isRefreshing = false;
+
+  void _handleManualRefresh() async {
+    if (_isRefreshing) return;
+    
+    setState(() => _isRefreshing = true);
+    _refreshRotationController.repeat();
+    
+    try {
+      // 1. Refresh Base Data from Firebase (Force update)
+      final trucksSnapshot = await _database.ref('trucks').get();
+      if (trucksSnapshot.exists) {
+        _allTrucksRegistry = Map<String, dynamic>.from(trucksSnapshot.value as Map);
+      }
+      
+      final locationsSnapshot = await _database.ref('truck_locations').get();
+      if (locationsSnapshot.exists) {
+        _liveLocations = Map<String, dynamic>.from(locationsSnapshot.value as Map);
+      }
+      
+      final usersSnapshot = await _database.ref('users').get();
+      if (usersSnapshot.exists) {
+        final Map data = usersSnapshot.value as Map;
+        final Map<String, String> currentAssignments = {};
+        data.forEach((key, value) {
+          if (value is Map && value['role'] == 'driver') {
+            final String? truckId = value['preferred_truck']?.toString();
+            if (truckId != null) currentAssignments[key.toString()] = truckId;
+          }
+        });
+        _driverCurrentTrucks.clear();
+        _driverCurrentTrucks.addAll(currentAssignments);
+      }
+
+      // 2. Reprocess merged data
+      _processMergedTrucks();
+      
+      // 3. Force UI Feedback (Centered White Box)
+      if (mounted) {
+        showDialog(
+          context: context,
+          barrierColor: Colors.black.withOpacity(0.1),
+          barrierDismissible: false,
+          builder: (context) {
+            Future.delayed(const Duration(milliseconds: 1500), () {
+              if (Navigator.canPop(context)) Navigator.pop(context);
+            });
+            return Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(32),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 15, offset: const Offset(0, 5))
+                  ],
+                ),
+                child: const Material(
+                  color: Colors.transparent,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.check_circle_rounded, color: Colors.green, size: 20),
+                      SizedBox(width: 12),
+                      Text("Fleet data refreshed", style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: Color(0xFF1A1A1A))),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      }
+    } catch (e) {
+      debugPrint("Refresh error: $e");
+    } finally {
+      if (mounted) {
+        _refreshRotationController.stop();
+        _refreshRotationController.reset();
+        setState(() => _isRefreshing = false);
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -52,6 +153,56 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
     _listenToTrucks();
     _listenToTruckMeta();
     _listenToUsers();
+    _circleController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 15),
+    )..repeat();
+    _refreshRotationController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    );
+    _startPulseAnimation();
+  }
+
+  void _startPulseAnimation() {
+    _pulseTimer?.cancel();
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 35), (timer) {
+      if (!mounted || mapboxMap == null) return;
+      
+      setState(() {
+        _pulseRadius += 0.6;
+        _pulseOpacity -= 0.015;
+        if (_pulseRadius >= 28.0) {
+          _pulseRadius = 8.0;
+          _pulseOpacity = 0.6;
+        }
+        _pulseRadius2 += 0.6;
+        _pulseOpacity2 -= 0.015;
+        if (_pulseRadius2 >= 28.0) {
+          _pulseRadius2 = 8.0;
+          _pulseOpacity2 = 0.4;
+        } else if (_pulseRadius2 < 8.0) {
+          _pulseRadius2 = 18.0;
+          _pulseOpacity2 = 0.4;
+        }
+      });
+      _updatePulseLayers();
+    });
+  }
+
+  void _updatePulseLayers() async {
+    if (mapboxMap == null) return;
+    try {
+      final style = mapboxMap!.style;
+      if (await style.styleLayerExists("trucks-pulse-layer")) {
+        await style.setStyleLayerProperty("trucks-pulse-layer", "circle-radius", _pulseRadius);
+        await style.setStyleLayerProperty("trucks-pulse-layer", "circle-opacity", _pulseOpacity.clamp(0.0, 1.0));
+      }
+      if (await style.styleLayerExists("trucks-pulse-layer-2")) {
+        await style.setStyleLayerProperty("trucks-pulse-layer-2", "circle-radius", _pulseRadius2);
+        await style.setStyleLayerProperty("trucks-pulse-layer-2", "circle-opacity", _pulseOpacity2.clamp(0.0, 1.0));
+      }
+    } catch (_) {}
   }
 
   @override
@@ -61,6 +212,9 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
     }
     _trucksMetaSubscription?.cancel();
     _usersSubscription?.cancel();
+    _circleController.dispose();
+    _refreshRotationController.dispose();
+    _pulseTimer?.cancel();
     super.dispose();
   }
 
@@ -75,9 +229,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
             newPlates[key.toString().toUpperCase()] = value['plateNumber'].toString();
           }
         });
-        if (mounted) {
-          setState(() => _truckPlates.addAll(newPlates));
-        }
+        if (mounted) setState(() => _truckPlates.addAll(newPlates));
       }
     });
   }
@@ -91,9 +243,7 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
         data.forEach((key, value) {
           if (value is Map && value['role'] == 'driver') {
             final String? truckId = value['preferred_truck']?.toString();
-            if (truckId != null) {
-              currentAssignments[key.toString()] = truckId;
-            }
+            if (truckId != null) currentAssignments[key.toString()] = truckId;
           }
         });
         if (mounted) {
@@ -107,214 +257,134 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
   }
 
   void _listenToTrucks() {
-    _database.ref('truck_locations').onValue.listen((event) {
+    _database.ref('trucks').onValue.listen((event) {
       if (event.snapshot.exists) {
-        final Map data = event.snapshot.value as Map;
+        _allTrucksRegistry = Map<String, dynamic>.from(event.snapshot.value as Map);
+        _processMergedTrucks();
+      }
+    });
+
+    _database.ref('truck_locations').onValue.listen((event) {
+      _liveLocations = event.snapshot.exists ? Map<String, dynamic>.from(event.snapshot.value as Map) : {};
+      _processMergedTrucks();
+    });
+  }
+
+  void _processMergedTrucks() {
+    final List<Map<dynamic, dynamic>> mergedList = [];
+    final Set<String> seenDrivers = {};
+    final Set<String> seenTrucks = {};
+    final int now = DateTime.now().millisecondsSinceEpoch;
+
+    debugPrint("=== ACTIVE FLEET ONLINE FILTER TRACE ===");
+
+    _liveLocations.forEach((key, value) {
+      if (value == null || value is! Map) return;
+      final Map liveData = value;
+      final String? driverId = liveData['driver_id']?.toString();
+      final String? driverName = liveData['driver_name']?.toString();
+      final String status = (liveData['status'] ?? 'OFFLINE').toString().toUpperCase();
+      
+      // Authoritative Truck ID resolution
+      String tid = (liveData['truck_id'] ?? key).toString().toUpperCase();
+      if (tid == "UNKNOWN" || tid == "N/A") {
+        tid = key.toString().toUpperCase();
+      }
+
+      final bool isOnlineField = liveData['isOnline'] == true;
+      final dynamic lastSeenRaw = liveData['lastSeen'];
+      final int lastSeen = lastSeenRaw is num ? lastSeenRaw.toInt() : 0;
+      
+      // 2-minute freshness window (120,000 milliseconds)
+      final bool isFresh = lastSeen > 0 && (now - lastSeen).abs() < 120000;
+      
+      bool isGenuinelyOnline = isOnlineField && status != 'OFFLINE' && driverId != null && isFresh;
+      
+      String rejectReason = "";
+      if (!isOnlineField) rejectReason += "IS_ONLINE_FALSE; ";
+      if (status == 'OFFLINE') rejectReason += "status OFFLINE; ";
+      if (driverId == null) rejectReason += "driver_id NULL; ";
+      if (!isFresh) {
+        if (lastSeen == 0) rejectReason += "INVALID_LAST_SEEN; ";
+        else rejectReason += "STALE_LAST_SEEN; ";
+      }
+      
+      // DEDUPLICATION: Verify authoritative assignment
+      if (isGenuinelyOnline) {
+        final String? authoritativeTruck = _driverCurrentTrucks[driverId];
         
-        // DEDUPLICATION LOGIC: One current record per Driver
-        final Map<String, Map<dynamic, dynamic>> driverToLatestTruck = {};
+        // If the live node key doesn't match the current assignment, it might be stale
+        if (authoritativeTruck != null && tid != authoritativeTruck) {
+           debugPrint("[ACTIVE_FLEET_CHECK] Warning: Live node $tid doesn't match assigned $authoritativeTruck. Checking freshness...");
+           // If authoritativeTruck also has a live entry, this one is definitely stale
+           if (_liveLocations.containsKey(authoritativeTruck)) {
+             isGenuinelyOnline = false;
+             rejectReason += "STALE_ASSIGNMENT; ";
+           }
+        }
 
-        data.forEach((key, value) {
-          final truckMap = Map<dynamic, dynamic>.from(value as Map);
-          final String nodeKey = key.toString();
-          final String? dId = truckMap['driver_id']?.toString();
-          
-          if (dId == null) {
-            // If no driver ID, treat node key as unique identifier (fallback)
-            truckMap['internal_id'] = nodeKey;
-            if (truckMap['truck_id'] == null) {
-              truckMap['truck_id'] = nodeKey;
-            }
-            driverToLatestTruck["node_$nodeKey"] = truckMap;
-            return;
-          }
-
-          truckMap['internal_id'] = nodeKey;
-          if (truckMap['truck_id'] == null) {
-            truckMap['truck_id'] = nodeKey;
-          }
-
-          if (!driverToLatestTruck.containsKey(dId)) {
-            driverToLatestTruck[dId] = truckMap;
-          } else {
-            // Determine which record is more current
-            final existing = driverToLatestTruck[dId]!;
-            final bool existingOnline = existing['isOnline'] == true;
-            final bool currentOnline = truckMap['isOnline'] == true;
-            
-            final int existingSeen = (existing['lastSeen'] ?? 0) as int;
-            final int currentSeen = (truckMap['lastSeen'] ?? 0) as int;
-
-            // Priority: 
-            // 1. Match driver's current assigned truck
-            // 2. isOnline
-            // 3. latest lastSeen
-            
-            final String? assignedTruck = _driverCurrentTrucks[dId];
-            final bool existingMatches = existing['truck_id'] == assignedTruck;
-            final bool currentMatches = truckMap['truck_id'] == assignedTruck;
-
-            if (currentMatches && !existingMatches) {
-              driverToLatestTruck[dId] = truckMap;
-            } else if (existingMatches && !currentMatches) {
-              // keep existing
-            } else if (currentOnline && !existingOnline) {
-              driverToLatestTruck[dId] = truckMap;
-            } else if (currentOnline == existingOnline && currentSeen > existingSeen) {
-              driverToLatestTruck[dId] = truckMap;
-            }
-          }
-        });
-
-        final List<Map<dynamic, dynamic>> list = driverToLatestTruck.values.toList();
-
-        if (mounted) {
-          setState(() {
-            _trucks = list;
-          });
-          if (kIsWeb) {
-            _updateWebOverlays();
-          } else {
-            _updateTruckMarkersNative();
-          }
-
-          // Auto-follow logic
-          if (_followedTruckId != null) {
-            final t = list.firstWhere(
-              (element) => element['internal_id'] == _followedTruckId || element['truck_id'] == _followedTruckId, 
-              orElse: () => {}
-            );
-            if (t.isNotEmpty) {
-              final double lat = (t['latitude'] ?? 0.0).toDouble();
-              final double lng = (t['longitude'] ?? 0.0).toDouble();
-              if (lat != 0 && lng != 0) {
-                mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat))));
-              }
-            }
-          }
-
-          for (final t in list) {
-            final String tid = t['truck_id'];
-            final String? sid = t['current_session'];
-            if (sid != null) {
-              if (!_sharedRouteSubscriptions.containsKey(tid)) {
-                _setupSharedRouteSubscription(tid, sid);
-              }
-            } else {
-              _sharedRouteSubscriptions[tid]?.cancel();
-              _sharedRouteSubscriptions.remove(tid);
-              _clearSharedRoute(tid);
-            }
-          }
+        if (seenDrivers.contains(driverId)) {
+          isGenuinelyOnline = false;
+          rejectReason += "DUPLICATE_DRIVER; ";
+        } else if (seenTrucks.contains(tid)) {
+          isGenuinelyOnline = false;
+          rejectReason += "DUPLICATE_TRUCK; ";
         }
       }
+      
+      debugPrint("[ACTIVE_FLEET_CHECK] truckId: $tid | driverId: $driverId | isOnline: $isOnlineField | included: $isGenuinelyOnline | reason: ${rejectReason.isEmpty ? 'NONE' : rejectReason}");
+      
+      if (isGenuinelyOnline && driverId != null) {
+        seenDrivers.add(driverId);
+        seenTrucks.add(tid);
+        
+        final resolved = TruckAssignmentService.resolveFleetNode(
+          nodeKey: key.toString(),
+          liveData: liveData,
+          trucksRegistry: _allTrucksRegistry,
+        );
+
+        mergedList.add({
+          ...Map<String, dynamic>.from(_allTrucksRegistry[tid] as Map? ?? _allTrucksRegistry[key] as Map? ?? {}),
+          ...Map<String, dynamic>.from(liveData),
+          'truck_id': resolved.truckId,
+          'truckNumber': resolved.truckNumber,
+          'plate_number': resolved.plateNumber,
+          'driver_name': resolved.driverName,
+          'status': status,
+          'isOnline': true,
+        });
+      }
     });
-  }
 
-  void _onMapCreated(MapboxMap map) {
-    mapboxMap = map;
-  }
-
-  void _onStyleLoaded(dynamic data) async {
-    _pointAnnotationManager = await mapboxMap?.annotations.createPointAnnotationManager();
-    if (!kIsWeb) {
-      _updateTruckMarkersNative();
-    }
-  }
-
-  void _updateWebOverlays() async {
-    if (!kIsWeb || mapboxMap == null) {
-      return;
-    }
-    final Map<String, Offset> newMarkerPositions = {};
-    for (final truck in _trucks) {
-      final double lat = (truck['latitude'] ?? 13.9402).toDouble();
-      final double lng = (truck['longitude'] ?? 121.1638).toDouble();
-      final String internalId = (truck['internal_id'] ?? "").toString();
-      try {
-        final screenPos = await mapboxMap!.pixelForCoordinate(Point(coordinates: Position(lng, lat)));
-        newMarkerPositions[internalId] = Offset(screenPos.x, screenPos.y);
-      } catch (e) {
-        debugPrint("[ADMIN MAP] Pixel mapping error: $e");
-      }
-    }
-    
-    final Map<String, Offset> newStartPositions = {};
-    for (final entry in _sessionStartPoints.entries) {
-      if (entry.value != null && _visiblePaths.contains(entry.key)) {
-        try {
-          final screenPos = await mapboxMap!.pixelForCoordinate(Point(coordinates: entry.value!));
-          newStartPositions[entry.key] = Offset(screenPos.x, screenPos.y);
-        } catch (_) {}
-      }
-    }
-
-    final Map<String, List<Offset>> newHeatmapPixels = {};
-    for (final entry in _webHeatmapData.entries) {
-      final List<Offset> pixels = [];
-      for (final point in entry.value) {
-        final screenPos = await mapboxMap!.pixelForCoordinate(Point(coordinates: Position(point['lng'], point['lat'])));
-        pixels.add(Offset(screenPos.x, screenPos.y));
-      }
-      newHeatmapPixels[entry.key] = pixels;
-    }
-
-    final Map<String, List<Offset>> newSharedPixels = {};
-    for (final entry in _webSharedRouteData.entries) {
-      final List<Offset> pixels = [];
-      for (final point in entry.value) {
-        final screenPos = await mapboxMap!.pixelForCoordinate(Point(coordinates: Position(point['lng'], point['lat'])));
-        pixels.add(Offset(screenPos.x, screenPos.y));
-      }
-      newSharedPixels[entry.key] = pixels;
-    }
-
-    final Map<String, List<Offset>> newOptimizedPixels = {};
-    if (_webOptimizedPixels.isNotEmpty) {
-       final List<Position> idealPathCoords = [Position(121.1638, 13.9402), Position(121.1645, 13.9410), Position(121.1655, 13.9425), Position(121.1668, 13.9440)];
-       for (final truckId in _webOptimizedPixels.keys) {
-         final List<Offset> pixels = [];
-         for (final pos in idealPathCoords) {
-           final screenPos = await mapboxMap!.pixelForCoordinate(Point(coordinates: pos));
-           pixels.add(Offset(screenPos.x, screenPos.y));
-         }
-         newOptimizedPixels[truckId] = pixels;
-       }
-    }
+    debugPrint("=========================================");
 
     if (mounted) {
-      setState(() { 
-        _webMarkerPositions = newMarkerPositions; 
-        _webStartPositions.clear();
-        _webStartPositions.addAll(newStartPositions);
-        _webHeatmapPixels.clear();
-        _webHeatmapPixels.addAll(newHeatmapPixels); 
-        _webSharedRoutePixels.clear();
-        _webSharedRoutePixels.addAll(newSharedPixels);
-        _webOptimizedPixels.clear();
-        _webOptimizedPixels.addAll(newOptimizedPixels);
-      });
-    }
-  }
-
-  void _toggleTrack(String truckId, double lat, double lng) {
-    setState(() {
-      if (_followedTruckId == truckId) {
-        _followedTruckId = null;
-      } else {
-        _selectedTruckId = truckId;
-        _followedTruckId = truckId;
+      setState(() => _trucks = mergedList);
+      _updateTruckMarkers();
+      
+      final activeTruckIds = mergedList.map((t) => t['truck_id'] as String).toSet();
+      final trucksToClear = _sharedRouteSubscriptions.keys.where((id) => !activeTruckIds.contains(id)).toList();
+      for (var id in trucksToClear) {
+        _sharedRouteSubscriptions[id]?.cancel();
+        _sharedRouteSubscriptions.remove(id);
+        _clearSharedRoute(id);
       }
-    });
-    if (_followedTruckId != null) {
-      mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat)), zoom: 16.0));
-      if (kIsWeb) {
-        Future.delayed(const Duration(milliseconds: 100), _updateWebOverlays);
+      for (var t in mergedList) {
+        final String tid = t['truck_id'];
+        final String? sid = t['current_session'];
+        if (sid != null) {
+          if (!_sharedRouteSubscriptions.containsKey(tid)) _setupRouteSubscription(tid, sid);
+        } else {
+          _sharedRouteSubscriptions[tid]?.cancel();
+          _sharedRouteSubscriptions.remove(tid);
+          _clearSharedRoute(tid);
+        }
       }
     }
   }
 
-  void _setupSharedRouteSubscription(String truckId, String sessionId) {
+  void _setupRouteSubscription(String truckId, String sessionId) {
     _sharedRouteSubscriptions[truckId]?.cancel();
     _sharedRouteSubscriptions[truckId] = _database.ref('driver_routes/$sessionId/route').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
@@ -322,16 +392,8 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
         final List<Map<dynamic, dynamic>> points = [];
         data.forEach((key, value) => points.add(Map<dynamic, dynamic>.from(value as Map)));
         points.sort((a, b) => (a['timestamp'] ?? 0).compareTo(b['timestamp'] ?? 0));
-        
         _lastRoutePoints[truckId] = points;
-        
-        if (_visiblePaths.contains(truckId)) {
-          if (!kIsWeb) {
-            _updateSharedRoutePolyline(truckId, points);
-          } else {
-            _updateWebSharedRoute(truckId, points);
-          }
-        }
+        if (_visiblePaths.contains(truckId)) _updateSharedRoutePolyline(truckId, points);
       }
     });
 
@@ -339,796 +401,832 @@ class _TrackTrucksScreenState extends State<TrackTrucksScreen> {
       if (event.snapshot.exists && event.snapshot.value != null) {
         final Map data = event.snapshot.value as Map;
         if (data['start_lat'] != null && data['start_lng'] != null) {
-          if (mounted) {
-            setState(() {
-              _sessionStartPoints[truckId] = Position(data['start_lng'], data['start_lat']);
-            });
-            if (kIsWeb) {
-              _updateWebOverlays();
-            } else {
-              _updateTruckMarkersNative();
-            }
-          }
+          if (mounted) setState(() => _sessionStartPoints[truckId] = Position(data['start_lng'], data['start_lat']));
         }
       }
     });
   }
 
   void _clearSharedRoute(String truckId) async {
-    if (mapboxMap == null) {
-      return;
-    }
+    if (mapboxMap == null) return;
     try {
       final style = mapboxMap!.style;
-      final String sourceId = "admin-route-source-$truckId";
+      final String sourceId = "route-source-$truckId";
       if (await style.styleSourceExists(sourceId)) {
         await style.setStyleSourceProperty(sourceId, "data", jsonEncode({"type": "FeatureCollection", "features": []}));
       }
     } catch (_) {}
-    if (kIsWeb) {
-      if (mounted) {
-        setState(() {
-          _webSharedRouteData.remove(truckId);
-          _webSharedRoutePixels.remove(truckId);
-        });
-      }
-    }
-  }
-
-  void _updateWebSharedRoute(String truckId, List<Map<dynamic, dynamic>> points) async {
-    if (!kIsWeb || mapboxMap == null) {
-      return;
-    }
-    
-    points.sort((a, b) => (a['timestamp'] as num).compareTo(b['timestamp'] as num));
-
-    final List<Map<String, dynamic>> filtered = [];
-    if (points.isNotEmpty) {
-      filtered.add({
-        'lat': (points.first['lat'] ?? 0.0).toDouble(),
-        'lng': (points.first['lng'] ?? 0.0).toDouble(),
-        'color': (points.first['color'] ?? 'GREEN').toString().toUpperCase(),
-        'timestamp': points.first['timestamp'],
-        'speed': (points.first['speed'] ?? 0.0).toDouble(),
-      });
-
-      for (int i = 1; i < points.length; i++) {
-        final prev = filtered.last;
-        final curr = points[i];
-        
-        final double lat = (curr['lat'] ?? 0.0).toDouble();
-        final double lng = (curr['lng'] ?? 0.0).toDouble();
-        final double prevLat = prev['lat'];
-        final double prevLng = prev['lng'];
-
-        final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, lat, lng);
-        final int timeDiff = ((curr['timestamp'] ?? 0) as int) - (prev['timestamp'] as int);
-        final double speedKmH = (curr['speed'] ?? 0.0).toDouble();
-
-        if (timeDiff > 0 && timeDiff < 15000 && d > 200) {
-          continue;
-        }
-
-        final bool isStationary = speedKmH < 2.0;
-        final double threshold = isStationary ? 8.0 : 4.0;
-        if (d < threshold && i != points.length - 1 && (curr['color'] ?? 'GREEN').toString().toUpperCase() == prev['color']) {
-           continue;
-        }
-
-        filtered.add({
-          'lat': lat,
-          'lng': lng,
-          'color': (curr['color'] ?? 'GREEN').toString().toUpperCase(),
-          'timestamp': curr['timestamp'],
-        });
-      }
-    }
-
-    final List<Map<String, dynamic>> processed = [];
-    if (filtered.isNotEmpty) {
-      int start = 0;
-      for (int i = 1; i <= filtered.length; i++) {
-        if (i == filtered.length || filtered[i]['color'] != filtered[start]['color']) {
-          final segment = filtered.sublist(start, i);
-          final simplified = _simplifyPoints(segment, 0.00004);
-          if (processed.isNotEmpty) {
-            processed.addAll(simplified.skip(1));
-          } else {
-            processed.addAll(simplified);
-          }
-          start = i;
-        }
-      }
-    }
-
-    _webSharedRouteData[truckId] = processed;
-    _updateWebOverlays();
+    if (mounted) setState(() => _sessionStartPoints.remove(truckId));
   }
 
   void _updateSharedRoutePolyline(String truckId, List<Map<dynamic, dynamic>> points) async {
-    if (mapboxMap == null || points.length < 2) {
-      return;
-    }
-
+    if (mapboxMap == null || points.length < 2) return;
     points.sort((a, b) => (a['timestamp'] as num).compareTo(b['timestamp'] as num));
 
+    final String sourceId = "route-source-$truckId";
+    final List<Map<String, dynamic>> features = [];
+
+    // Filter/Smooth logic
     final List<Map<dynamic, dynamic>> filtered = [];
     if (points.isNotEmpty) {
       filtered.add(points.first);
       for (int i = 1; i < points.length; i++) {
         final prev = filtered.last;
         final curr = points[i];
-        
-        final double lat = (curr['lat'] ?? 0.0).toDouble();
-        final double lng = (curr['lng'] ?? 0.0).toDouble();
-        final double prevLat = (prev['lat'] ?? 0.0).toDouble();
-        final double prevLng = (prev['lng'] ?? 0.0).toDouble();
-
-        final double d = geo.Geolocator.distanceBetween(prevLat, prevLng, lat, lng);
-        final int timeDiff = ((curr['timestamp'] ?? 0) as int) - (prev['timestamp'] as int);
-        final double speedKmH = (curr['speed'] ?? 0.0).toDouble();
-
-        if (timeDiff > 0 && timeDiff < 15000 && d > 200) {
-          continue;
-        }
-
-        final bool isStationary = speedKmH < 2.0;
-        final double threshold = isStationary ? 8.0 : 4.0;
-        if (d < threshold && i != points.length - 1 && (curr['color'] ?? 'GREEN').toString().toUpperCase() == (prev['color'] ?? 'GREEN').toString().toUpperCase()) {
-           continue;
-        }
-
-        filtered.add(curr);
+        final double d = geo.Geolocator.distanceBetween((prev['lat'] ?? 0.0).toDouble(), (prev['lng'] ?? 0.0).toDouble(), (curr['lat'] ?? 0.0).toDouble(), (curr['lng'] ?? 0.0).toDouble());
+        if (d > 5.0 || i == points.length - 1) filtered.add(curr);
       }
     }
 
-    final List<Map<dynamic, dynamic>> processed = [];
-    if (filtered.isNotEmpty) {
-      int start = 0;
-      for (int i = 1; i <= filtered.length; i++) {
-        final String currentStatus = (filtered[start]['color'] ?? 'GREEN').toString().toUpperCase();
-        if (i == filtered.length || (filtered[i]['color'] ?? 'GREEN').toString().toUpperCase() != currentStatus) {
-          final segment = filtered.sublist(start, i);
-          final simplified = _simplifyPoints(segment, 0.00004);
-          if (processed.isNotEmpty) {
-            processed.addAll(simplified.skip(1));
-          } else {
-            processed.addAll(simplified);
-          }
-          start = i;
-        }
-      }
-    }
-
-    final String sourceId = "admin-route-source-$truckId";
-    final List<Map<String, dynamic>> features = [];
-
-    if (processed.length >= 2) {
-      for (int i = 1; i < processed.length; i++) {
-        final prev = processed[i - 1];
-        final curr = processed[i];
-        
-        String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
-        if (color == "BLUE") {
-          color = "GREEN";
-        } 
-
-        if (features.isNotEmpty && features.last['properties']['color'] == color) {
-          final List coords = features.last['geometry']['coordinates'];
-          coords.add([(curr['lng'] ?? 0.0).toDouble(), (curr['lat'] ?? 0.0).toDouble()]);
-        } else {
-          features.add({
-            "type": "Feature",
-            "geometry": {
-              "type": "LineString",
-              "coordinates": [
-                [(prev['lng'] ?? 0.0).toDouble(), (prev['lat'] ?? 0.0).toDouble()],
-                [(curr['lng'] ?? 0.0).toDouble(), (curr['lat'] ?? 0.0).toDouble()]
-              ]
-            },
-            "properties": {"color": color}
-          });
-        }
+    if (filtered.length >= 2) {
+      for (int i = 1; i < filtered.length; i++) {
+        final prev = filtered[i - 1];
+        final curr = filtered[i];
+        final String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
+        features.add({
+          "type": "Feature",
+          "geometry": { "type": "LineString", "coordinates": [[(prev['lng'] ?? 0.0).toDouble(), (prev['lat'] ?? 0.0).toDouble()], [(curr['lng'] ?? 0.0).toDouble(), (curr['lat'] ?? 0.0).toDouble()]] },
+          "properties": {"color": color}
+        });
       }
     }
 
     final featureCollection = {"type": "FeatureCollection", "features": features};
-
     try {
       final style = mapboxMap!.style;
-      final bool sourceExists = await style.styleSourceExists(sourceId);
-      if (!sourceExists) {
+      if (!(await style.styleSourceExists(sourceId))) {
         await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(featureCollection)));
-        await style.addLayer(LineLayer(
-          id: "admin-route-layer-$truckId",
-          sourceId: sourceId,
-          lineColor: Colors.green.toARGB32(),
-          lineWidth: 8.0, lineOpacity: 0.85, lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND,
-        ));
-        await style.setStyleLayerProperty("admin-route-layer-$truckId", "line-color", [
-          "match", ["get", "color"], 
-          "GREEN", "#4CAF50",
-          "YELLOW", "#FFEB3B", 
-          "PINK", "#E91E63", 
-          "BLACK", "#212121",
-          "#4CAF50"
-        ]);
-      } else {
-        await style.setStyleSourceProperty(sourceId, "data", jsonEncode(featureCollection));
-      }
-    } catch (e) {
-      debugPrint("[ADMIN ROUTE] Render error for $truckId: $e");
-    }
-  }
-
-  List<Map<String, dynamic>> _simplifyPoints(List<Map<dynamic, dynamic>> points, double epsilon) {
-    if (points.length < 3) {
-      return points.map((e) => Map<String, dynamic>.from(e)).toList();
-    }
-    int index = -1;
-    double maxDist = 0;
-    for (int i = 1; i < points.length - 1; i++) {
-      final double d = _perpendicularDistance(points[i], points.first, points.last);
-      if (d > maxDist) {
-        index = i;
-        maxDist = d;
-      }
-    }
-    if (maxDist > epsilon) {
-      final List<Map<String, dynamic>> res1 = _simplifyPoints(points.sublist(0, index + 1), epsilon);
-      final List<Map<String, dynamic>> res2 = _simplifyPoints(points.sublist(index), epsilon);
-      return [...res1.sublist(0, res1.length - 1), ...res2];
-    }
-    return [Map<String, dynamic>.from(points.first), Map<String, dynamic>.from(points.last)];
-  }
-
-  double _perpendicularDistance(Map<dynamic, dynamic> p, Map<dynamic, dynamic> start, Map<dynamic, dynamic> end) {
-    final double x = (p['lng'] as num).toDouble();
-    final double y = (p['lat'] as num).toDouble();
-    final double x1 = (start['lng'] as num).toDouble();
-    final double y1 = (start['lat'] as num).toDouble();
-    final double x2 = (end['lng'] as num).toDouble();
-    final double y2 = (end['lat'] as num).toDouble();
-    final double dx = x2 - x1;
-    final double dy = y2 - y1;
-    if (dx == 0 && dy == 0) {
-      return sqrt(pow(x - x1, 2) + pow(y - y1, 2));
-    }
-    final double t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy);
-    if (t < 0) {
-      return sqrt(pow(x - x1, 2) + pow(y - y1, 2));
-    }
-    if (t > 1) {
-      return sqrt(pow(x - x2, 2) + pow(y - y2, 2));
-    }
-    return sqrt(pow(x - (x1 + t * dx), 2) + pow(y - (y1 + t * dy), 2));
-  }
-
-  void _updateTruckMarkersNative() async {
-    if (_pointAnnotationManager == null || _trucks.isEmpty || kIsWeb) {
-      return;
-    }
-    try {
-      await _pointAnnotationManager?.deleteAll();
+        await style.addLayer(LineLayer(id: "route-layer-$truckId", sourceId: sourceId, lineColor: Colors.green.toARGB32(), lineWidth: 8.0, lineOpacity: 0.9, lineCap: LineCap.ROUND, lineJoin: LineJoin.ROUND));
+        await style.setStyleLayerProperty("route-layer-$truckId", "line-color", ["match", ["get", "color"], "GREEN", "#00FF00", "YELLOW", "#FFFF00", "PINK", "#FF1493", "BLACK", "#000000", "BLUE", "#0000FF", "#00FF00"]);
+      } else { await style.setStyleSourceProperty(sourceId, "data", jsonEncode(featureCollection)); }
     } catch (_) {}
-    
-    for (final truck in _trucks) {
-      final double lat = (truck['latitude'] ?? 13.9402).toDouble();
-      final double lng = (truck['longitude'] ?? 121.1638).toDouble();
-      final String id = (truck['truck_id'] ?? truck['internal_id'] ?? "Unknown").toString();
-      try {
-        await _pointAnnotationManager?.create(PointAnnotationOptions(
-          geometry: Point(coordinates: Position(lng, lat)),
-          textField: id,
-          textOffset: [0, 2],
-          textColor: Colors.blue.toARGB32(),
-          iconImage: "truck-15",
-        ));
-      } catch (_) {}
-    }
+  }
 
-    for (final entry in _sessionStartPoints.entries) {
-      if (entry.value != null && _visiblePaths.contains(entry.key)) {
-        try {
-          await _pointAnnotationManager?.create(PointAnnotationOptions(
-            geometry: Point(coordinates: entry.value!),
-            textField: "START / ${entry.key}",
-            textColor: Colors.green.shade800.toARGB32(),
-            textSize: 10.0,
-            textHaloColor: Colors.white.toARGB32(),
-            textHaloWidth: 2.0,
-          ));
-        } catch (_) {}
+  void _recenterToBalintawak() { mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: _balintawakCenter), zoom: 14.5)); }
+  void _focusOnTruck(Map<dynamic, dynamic> truck) {
+    final double lat = (truck['latitude'] ?? 0.0).toDouble();
+    final double lng = (truck['longitude'] ?? 0.0).toDouble();
+    if (lat == 0 || lng == 0) return;
+    mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(lng, lat)), zoom: 17.5));
+  }
+
+  void _onMapCreated(MapboxMap map) {
+    mapboxMap = map;
+    mapboxMap?.annotations.createPointAnnotationManager().then((manager) {
+      if (mounted) setState(() { _pointAnnotationManager = manager; _managersReady = true; });
+    });
+  }
+
+  void _onStyleLoaded(dynamic data) async {
+    mapboxMap?.location.updateSettings(LocationComponentSettings(enabled: false, pulsingEnabled: false));
+    mapboxMap?.compass.updateSettings(CompassSettings(position: OrnamentPosition.TOP_LEFT, marginTop: 200.0, marginLeft: 20.0));
+    _updateTruckMarkers();
+    _recenterToBalintawak();
+  }
+
+  bool _isUpdatingMarkers = false;
+  void _updateTruckMarkers() async {
+    if (mapboxMap == null || _isUpdatingMarkers) return;
+    _isUpdatingMarkers = true;
+    try {
+      final activeTruckIds = <String>{};
+      final List<Map<String, dynamic>> pulseFeatures = [];
+      for (var truck in _trucks) {
+        final double lat = (truck['latitude'] ?? 0.0).toDouble();
+        final double lng = (truck['longitude'] ?? 0.0).toDouble();
+        if (lat == 0 || lng == 0 || truck['isOnline'] != true) continue;
+        final String tid = truck['truck_id'].toString();
+        activeTruckIds.add(tid);
+        final String status = (truck['status'] ?? "ACTIVE").toString().toUpperCase();
+        final point = Point(coordinates: Position(lng, lat));
+        int color = Colors.green.toARGB32();
+        if (status == "IDLE" || status == "PAUSED") color = Colors.orange.toARGB32();
+        if (status == "STOP" || status == "STOPPED" || status == "FULL") color = Colors.red.toARGB32();
+        if (status == "COMPLETE" || status == "FINISHED" || status == "COMPLETED") color = Colors.blue.toARGB32();
+
+        if (_managersReady && _pointAnnotationManager != null) {
+          if (_truckMarkers.containsKey(tid)) {
+            final marker = _truckMarkers[tid]!;
+            marker.geometry = point; marker.textField = tid; marker.textColor = color;
+            _pointAnnotationManager?.update(marker);
+          } else {
+            _pointAnnotationManager?.create(PointAnnotationOptions(geometry: point, textField: tid, textOffset: [0, 2.0], textColor: color, textSize: 12, iconSize: 0)).then((m) { if (m != null) _truckMarkers[tid] = m; });
+          }
+        }
+        pulseFeatures.add({ "type": "Feature", "geometry": {"type": "Point", "coordinates": [lng, lat]}, "properties": {"status": status, "type": "TRUCK"} });
       }
-    }
+      if (_managersReady && _pointAnnotationManager != null) {
+        final offlineKeys = _truckMarkers.keys.where((id) => !activeTruckIds.contains(id)).toList();
+        for (var key in offlineKeys) {
+          final marker = _truckMarkers[key]!;
+          _pointAnnotationManager?.delete(marker); _truckMarkers.remove(key);
+        }
+      }
+
+      final style = mapboxMap!.style;
+      final String sourceId = "trucks-live-location-source";
+      if (!_truckLayersCreated) {
+        try {
+          await style.removeStyleLayer("trucks-marker-circle");
+          await style.removeStyleLayer("trucks-pulse-layer");
+          await style.removeStyleSource(sourceId);
+        } catch (_) {}
+        await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode({"type": "FeatureCollection", "features": pulseFeatures})));
+        final statusColorExpr = ["match", ["get", "status"], "IDLE", Colors.orange.toARGB32(), "PAUSED", Colors.orange.toARGB32(), "STOP", Colors.red.toARGB32(), "STOPPED", Colors.red.toARGB32(), "FULL", Colors.red.toARGB32(), "COMPLETE", Colors.blue.toARGB32(), "FINISHED", Colors.blue.toARGB32(), "COMPLETED", Colors.blue.toARGB32(), Colors.green.toARGB32()];
+        await style.addLayer(CircleLayer(id: "trucks-pulse-layer", sourceId: sourceId, circleRadius: _pulseRadius, circleColor: Colors.green.toARGB32(), circleOpacity: _pulseOpacity, circleSortKey: 200.0));
+        await style.setStyleLayerProperty("trucks-pulse-layer", "circle-color", statusColorExpr);
+        await style.addLayer(CircleLayer(id: "trucks-marker-circle", sourceId: sourceId, circleRadius: 8.0, circleColor: Colors.green.toARGB32(), circleStrokeWidth: 3.0, circleStrokeColor: Colors.white.toARGB32(), circleSortKey: 2000.0));
+        await style.setStyleLayerProperty("trucks-marker-circle", "circle-color", statusColorExpr);
+        if (mounted) setState(() => _truckLayersCreated = true);
+      } else {
+        await style.setStyleSourceProperty(sourceId, "data", jsonEncode({"type": "FeatureCollection", "features": pulseFeatures}));
+      }
+    } catch (e) { debugPrint("GIS Render Error: $e"); } finally { _isUpdatingMarkers = false; }
   }
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
-      final bool isDesktop = constraints.maxWidth >= 1024;
-      return Scaffold(
-        backgroundColor: const Color(0xFFF8F9FA),
-        body: isDesktop ? _buildDesktopLayout() : _buildMobileLayout(),
+      final bool isDesktop = constraints.maxWidth >= 900;
+      return FadeSlideEntrance(
+        child: Scaffold(
+          backgroundColor: Colors.white, 
+          body: isDesktop ? _buildDesktopLayout() : _buildMobileLayout(), 
+        ),
       );
     });
   }
 
   Widget _buildDesktopLayout() {
-    return Row(children: [
-      Expanded(
-        child: Stack(children: [
+    return Container(
+      margin: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(40),
+        boxShadow: AppTheme.balancedDeepShadow,
+        border: Border.all(color: const Color(0xFFE0E0E0), width: 2),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
           Positioned.fill(
             child: MapWidget(
               onMapCreated: _onMapCreated,
               onStyleLoadedListener: _onStyleLoaded,
-              onCameraChangeListener: (e) {
-                if (kIsWeb) {
-                  _updateWebOverlays();
-                }
-              },
-              viewport: CameraViewportState(center: Point(coordinates: Position(121.1638, 13.9413)), zoom: 14.0),
+              viewport: CameraViewportState(center: Point(coordinates: _balintawakCenter), zoom: 14.5),
             ),
           ),
-          if (kIsWeb) ..._buildWebOverlays(),
-          _buildHeader(),
-          _buildRouteProgress(true),
-        ]),
-      ),
-      Container(
-        width: 400,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          boxShadow: [
-            BoxShadow(color: Colors.black.withAlpha(10), blurRadius: 20, offset: const Offset(-5, 0)),
-          ],
-        ),
-        child: _buildFleetStatusContent(null),
-      ),
-    ]);
-  }
-
-  List<Widget> _buildWebOverlays() {
-    final List<Widget> overlays = [];
-    overlays.add(Positioned.fill(
-      child: IgnorePointer(
-        child: CustomPaint(
-          painter: WebPathPainter(
-            heatmapData: _webHeatmapData,
-            heatmapPixels: _webHeatmapPixels,
-            sharedRouteData: _webSharedRouteData,
-            sharedRoutePixels: _webSharedRoutePixels,
-            optimizedPixels: _webOptimizedPixels,
-          ),
-        ),
-      ),
-    ));
-    overlays.addAll(_trucks.map((truck) {
-      final String internalId = (truck['internal_id'] ?? "").toString();
-      final String id = (truck['truck_id'] ?? internalId).toString();
-      final offset = _webMarkerPositions[internalId];
-      if (offset == null) {
-        return const SizedBox.shrink();
-      }
-      return Positioned(
-        left: offset.dx - 20,
-        top: offset.dy - 40,
-        child: Column(children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.9),
-              borderRadius: BorderRadius.circular(6),
-              boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4)],
+          _buildCornerHeader(),
+          _buildMapControls(bottom: 32),
+          _buildDebugOverlay(),
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeInOutQuart,
+            top: 24, bottom: 24,
+            right: _isFleetPanelVisible ? 24 : -450,
+            child: PointerInterceptor(
+              child: Container(
+                width: 420,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.95),
+                  borderRadius: BorderRadius.circular(32),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 30, spreadRadius: 5, offset: const Offset(-10, 0))],
+                  border: Border.all(color: Colors.white.withOpacity(0.6), width: 1.5),
+                ),
+                child: Column(children: [
+                  _buildFixedPanelHeader(),
+                  const Divider(height: 1),
+                  Expanded(child: ClipRRect(borderRadius: const BorderRadius.vertical(bottom: Radius.circular(32)), child: _buildFleetStatusContent(null))),
+                ]),
+              ),
             ),
-            child: Text(id, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: Colors.blue)),
           ),
-          const Icon(Icons.local_shipping, color: Colors.blue, size: 28),
-        ]),
-      );
-    }));
-
-    _webStartPositions.forEach((truckId, offset) {
-      overlays.add(Positioned(
-        left: offset.dx - 15,
-        top: offset.dy - 35,
-        child: Column(children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(6),
-              boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4)],
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeInOutQuart,
+            top: 0, bottom: 0,
+            right: _isFleetPanelVisible ? 444 : 0,
+            child: Center(
+              child: PointerInterceptor(
+                child: GestureDetector(
+                  onTap: () => setState(() => _isFleetPanelVisible = !_isFleetPanelVisible),
+                  child: Container(
+                    width: 24, height: 80,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00695C), 
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(16),
+                        bottomLeft: Radius.circular(16),
+                      ), 
+                      boxShadow: AppTheme.pulidongShadow,
+                    ),
+                    child: Icon(_isFleetPanelVisible ? Icons.keyboard_arrow_right_rounded : Icons.keyboard_arrow_left_rounded, size: 18, color: Colors.white),
+                  ),
+                ),
+              ),
             ),
-            child: Text("START / $truckId", style: const TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Colors.green)),
           ),
-          const Icon(Icons.location_on, color: Colors.green, size: 24),
-        ]),
-      ));
-    });
-    return overlays;
+        ],
+      ),
+    );
   }
 
   Widget _buildMobileLayout() {
     return Stack(children: [
-      Positioned.fill(
-        child: MapWidget(
-          onMapCreated: _onMapCreated,
-          onStyleLoadedListener: _onStyleLoaded,
-          onCameraChangeListener: (e) {
-            if (kIsWeb) {
-              _updateWebOverlays();
-            }
-          },
-          viewport: CameraViewportState(center: Point(coordinates: Position(121.1638, 13.9413)), zoom: 14.0),
+      Positioned.fill(child: Stack(children: [
+        Positioned.fill(child: MapWidget(onMapCreated: _onMapCreated, onStyleLoadedListener: _onStyleLoaded, viewport: CameraViewportState(center: Point(coordinates: _balintawakCenter), zoom: 14.5))),
+        _buildMapControls(bottom: 200),
+      ])),
+      _buildFloatingHeader(),
+      _buildDebugOverlay(),
+      Positioned.fill(child: DraggableScrollableSheet(
+        initialChildSize: 0.22, minChildSize: 0.22, maxChildSize: 0.95, snap: true, snapSizes: const [0.22, 0.5, 0.95],
+        builder: (context, scrollController) => PointerInterceptor(child: _buildFleetStatusContent(scrollController, isMobile: true))))
+    ]);
+  }
+
+  Widget _buildCornerHeader() {
+    return Positioned(
+      top: 24, left: 24,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+        decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(24), boxShadow: AppTheme.pulidongShadow, border: Border.all(color: Colors.white, width: 2)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          const Text("Fleet GIS Tracking", style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, letterSpacing: -0.5)),
+          const SizedBox(height: 4),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 8, height: 8, decoration: const BoxDecoration(color: Colors.greenAccent, shape: BoxShape.circle)),
+            const SizedBox(width: 8),
+            const Text("Real-time telemetry and monitoring", style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w700)),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildFixedPanelHeader() {
+    return const Padding(
+      padding: EdgeInsets.fromLTRB(28, 32, 28, 20),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text("Active Fleet Status", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
+        SizedBox(height: 4),
+        Text("Live collection unit updates", style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500)),
+      ]),
+    );
+  }
+
+  Widget _buildDebugOverlay() {
+    final active = _trucks.where((t) => t['isOnline'] == true).toList();
+    final bool isDesktop = MediaQuery.of(context).size.width >= 900;
+    return Positioned(
+      top: isDesktop ? 125 : 80, left: isDesktop ? 24 : 16,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white, 
+          borderRadius: BorderRadius.circular(16), 
+          boxShadow: AppTheme.pulidongShadow, 
+          border: Border.all(color: Colors.white, width: 1.5)
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min, 
+          children: [
+            _buildHUDSeparator("TOTAL UNITS", "${_trucks.length}", isGreen: true),
+            const SizedBox(width: 12),
+            Container(width: 1.5, height: 16, color: Colors.grey.shade300),
+            const SizedBox(width: 12),
+            _buildHUDSeparator("ONLINE", "${active.length}", isGreen: true),
+          ],
         ),
       ),
-      if (kIsWeb) ..._buildWebOverlays(),
-      _buildHeader(),
-      _buildRouteProgress(false),
-      Positioned.fill(
-        child: DraggableScrollableSheet(
-          initialChildSize: 0.45,
-          minChildSize: 0.18,
-          maxChildSize: 0.95,
-          snap: true,
-          snapSizes: const [0.18, 0.45, 0.95],
-          builder: (context, scrollController) {
-            return PointerInterceptor(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(40)),
-                  boxShadow: [
-                    BoxShadow(color: Colors.black.withAlpha(20), blurRadius: 20, spreadRadius: 5, offset: const Offset(0, -5)),
-                  ],
+    );
+  }
+
+  Widget _buildHUDSeparator(String label, String value, {bool isGreen = false}) {
+    return Row(children: [
+      Text("$label: ", style: TextStyle(color: Colors.grey.shade600, fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
+      Text(value, style: TextStyle(color: isGreen ? const Color(0xFF00796B) : const Color(0xFF1A1A1A), fontSize: 12, fontWeight: FontWeight.w900)),
+    ]);
+  }
+
+  Widget _buildFloatingHeader() {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double btnSize = (screenWidth * 0.12).clamp(44.0, 50.0);
+    final bool isMobile = screenWidth < 900;
+
+    return Positioned(
+      top: 12, left: 16, right: 16,
+      child: SafeArea(
+        child: Row(children: [
+          _HoverZoomCard(
+            onTap: () {
+              if (isMobile) {
+                Scaffold.of(context).openDrawer();
+              } else if (widget.onBack != null) {
+                widget.onBack!();
+              }
+            },
+            child: Container(
+              width: btnSize, 
+              height: btnSize, 
+              decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle, boxShadow: AppTheme.pulidongShadow), 
+              child: Icon(
+                isMobile ? Icons.menu_rounded : Icons.arrow_back_ios_new_rounded, 
+                color: const Color(0xFF1A1A1A), 
+                size: isMobile ? 22 : 18
+              )
+            )
+          ),
+          const SizedBox(width: 10),
+          Expanded(child: Container(height: btnSize, padding: const EdgeInsets.symmetric(horizontal: 16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: AppTheme.pulidongShadow), child: const Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [Text("Track Fleet", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF1A1A1A))), Text("Live GPS connected", style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600))]))),
+          const SizedBox(width: 10),
+          _HoverZoomCard(
+            onTap: isMobile ? _handleManualRefresh : null,
+            child: Container(
+              width: btnSize, 
+              height: btnSize, 
+              decoration: BoxDecoration(
+                color: Colors.white, 
+                shape: BoxShape.circle, 
+                boxShadow: AppTheme.pulidongShadow
+              ), 
+              child: RotationTransition(
+                turns: _refreshRotationController,
+                child: Icon(
+                  isMobile ? Icons.refresh_rounded : Icons.explore_rounded, 
+                  color: const Color(0xFF1A1A1A), 
+                  size: 20
                 ),
-                child: _buildFleetStatusContent(scrollController, isMobile: true),
+              )
+            ),
+          )
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildMapControls({double bottom = 240}) {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final bool isDesktop = screenWidth >= 900;
+    final double btnSize = isDesktop ? 56.0 : (screenWidth * 0.15).clamp(48.0, 60.0);
+    final double iconSize = isDesktop ? 24.0 : (screenWidth * 0.065).clamp(22.0, 26.0);
+    return Positioned(
+      bottom: bottom, left: isDesktop ? 24 : null, right: isDesktop ? null : 16,
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        _buildMapControlButton(icon: _isFollowLocked ? Icons.gps_fixed_rounded : Icons.gps_not_fixed_rounded, isActive: _isFollowLocked || _isTargetActive, size: btnSize, iconSize: iconSize, onTap: () {
+          setState(() { _isFollowLocked = !_isFollowLocked; _isTargetActive = true; });
+          if (_isFollowLocked && _trucks.isNotEmpty) _focusOnTruck(_trucks.first); // Default to first for admin
+          Future.delayed(const Duration(seconds: 2), () { if (mounted) setState(() => _isTargetActive = false); });
+        }),
+        const SizedBox(height: 12),
+        _buildMapControlButton(icon: Icons.map_outlined, isActive: _isMapActive, size: btnSize, iconSize: iconSize, onTap: () { setState(() => _isMapActive = true); _recenterToBalintawak(); Future.delayed(const Duration(seconds: 2), () { if (mounted) setState(() => _isMapActive = false); }); }),
+      ]),
+    );
+  }
+
+  Widget _buildMapControlButton({required IconData icon, required bool isActive, required double size, required double iconSize, required VoidCallback onTap}) {
+    return StatefulBuilder(builder: (context, setInnerState) {
+      bool isHovered = false;
+      return MouseRegion(onEnter: (_) => setInnerState(() => isHovered = true), onExit: (_) => setInnerState(() => isHovered = false), cursor: SystemMouseCursors.click, child: GestureDetector(onTap: onTap, child: AnimatedContainer(duration: const Duration(milliseconds: 200), width: size, height: size, decoration: BoxDecoration(color: isActive ? const Color(0xFF00796B) : (isHovered ? const Color(0xFFE0F2F1) : Colors.white), shape: BoxShape.circle, boxShadow: AppTheme.pulidongShadow, border: Border.all(color: isActive ? const Color(0xFF00796B) : (isHovered ? const Color(0xFF00796B).withOpacity(0.3) : Colors.transparent), width: 1.5)), child: Icon(icon, color: isActive ? Colors.white : (isHovered ? const Color(0xFF00796B) : const Color(0xFF1A1A1A)), size: iconSize))));
+    });
+  }
+
+  Widget _buildFleetStatusContent(ScrollController? scrollController, {bool isMobile = false}) {
+    final List sortedTrucks = List.from(_trucks);
+    sortedTrucks.sort((a, b) {
+      final bool aOnline = a['isOnline'] == true;
+      final bool bOnline = b['isOnline'] == true;
+      if (aOnline && !bOnline) return -1;
+      if (!aOnline && bOnline) return 1;
+      return 0;
+    });
+    final List<Widget> items = sortedTrucks.isEmpty ? [const Padding(padding: EdgeInsets.all(60), child: Center(child: Text("Scanning for active units...", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w500))))] : sortedTrucks.map((truck) => _buildOrganizedTruckCard(truck)).toList();
+    
+    if (isMobile) {
+      return Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(40)),
+          boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 25, spreadRadius: 5, offset: Offset(0, -5))],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: CustomScrollView(
+          controller: scrollController,
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+          slivers: [
+            SliverPersistentHeader(
+              pinned: true,
+              delegate: _StickyHeaderDelegate(
+                minHeight: 110,
+                maxHeight: 110,
+                child: Container(
+                  color: Colors.white,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const SizedBox(height: 12),
+                      // Drag Handle (Still centered)
+                      Align(
+                        alignment: Alignment.center,
+                        child: Container(
+                          width: 50,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade300,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      // Header Title (Left aligned)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 28),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text("Active Fleet Status", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
+                            SizedBox(height: 4),
+                            Text("Real-time updates on active units", style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500)),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      const Divider(height: 1, thickness: 1, color: Color(0xFFF5F5F5)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.only(top: 8, bottom: 120),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => items[index],
+                  childCount: items.length,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView(controller: scrollController, physics: const BouncingScrollPhysics(), padding: EdgeInsets.zero, children: [
+      const SizedBox(height: 12),
+      ...items,
+      const SizedBox(height: 120)
+    ]);
+  }
+
+  Widget _buildOrganizedTruckCard(Map<dynamic, dynamic> truck) {
+    final String tid = (truck['truck_id'] ?? truck['truckId'] ?? 'N/A').toString().toUpperCase();
+    final String license = (truck['plate_number'] ?? truck['plateNumber'] ?? 'N/A').toString().toUpperCase();
+    final String driver = (truck['driver_name'] ?? truck['driverName'] ?? 'Driver').toString();
+    final String status = (truck['status'] ?? 'IDLE').toString().toUpperCase();
+    final bool isActive = status == 'ACTIVE' || status == 'COLLECTING';
+    final Color statusColor = isActive ? const Color(0xFF00796B) : Colors.grey.shade400;
+
+    final double speed = (truck['speed'] ?? 0.0).toDouble();
+    final double dist = double.tryParse(truck['distance_covered']?.toString() ?? "0.0") ?? 0.0;
+    final double fuel = (truck['fuel_level'] ?? 0.0).toDouble();
+    final int stops = (truck['stops_count'] ?? 0) as int;
+    final bool isPathVisible = _visiblePaths.contains(tid);
+
+    String eta = isActive
+        ? "${PredictionEngine.estimateArrivalTime(dist > 0 ? dist : 2.5, [
+            speed > 5 ? speed : 15.0
+          ]).toStringAsFixed(0)} mins"
+        : "--";
+    String lastUpdate = truck['updatedAt'] != null ? "just now" : "Offline";
+
+    return _HoverZoomCard(
+      onTap: () => _focusOnTruck(truck),
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(32),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.12),
+                blurRadius: 20,
+                offset: const Offset(0, 0),
+                spreadRadius: 2,
+              ),
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 10,
+                offset: const Offset(0, 4),
+                spreadRadius: 0,
+              ),
+            ],
+            border: Border.all(color: Colors.grey.shade50, width: 1)),
+        child: Column(children: [
+          // Top Row: Icon, Name/License, Status
+          Row(children: [
+            Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                    color: const Color(0xFFE3F2FD), borderRadius: BorderRadius.circular(16)),
+                child:
+                    const Icon(Icons.local_shipping_rounded, color: Color(0xFF2196F3), size: 28)),
+            const SizedBox(width: 16),
+            Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(driver,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w900, fontSize: 18, color: Color(0xFF1A1A1A))),
+              Text("$tid | $license",
+                  style: const TextStyle(
+                      color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w600))
+            ])),
+            Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                    color: statusColor.withAlpha(20), borderRadius: BorderRadius.circular(12)),
+                child: Text(status,
+                    style: TextStyle(color: statusColor, fontSize: 9, fontWeight: FontWeight.w900))),
+          ]),
+
+          const SizedBox(height: 24),
+
+          // Middle Info: Location, Speed, Driver
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            _buildMetricsInfo(Icons.location_on_rounded, Colors.redAccent, "Location",
+                (truck['purok'] ?? "Balintawak").toString()),
+            _buildMetricsInfo(Icons.speed_rounded, Colors.blueAccent, "Speed",
+                "${speed.toStringAsFixed(0)} km/h"),
+            _buildMetricsInfo(Icons.person_rounded, Colors.indigoAccent, "Driver", driver),
+          ]),
+
+          const SizedBox(height: 20),
+
+          // Metrics Pill Row
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            decoration: BoxDecoration(
+                color: const Color(0xFFF8F9FA),
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                    spreadRadius: 0,
+                  ),
+                ],
+                border: Border.all(color: Colors.grey.shade100)),
+            child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
+              _buildPillMetric(Icons.straighten_rounded, Colors.green, "DISTANCE",
+                  "${dist.toStringAsFixed(1)} km"),
+              Container(width: 1, height: 20, color: Colors.grey.shade300),
+              _buildPillMetric(Icons.local_gas_station_rounded, Colors.orange, "FUEL",
+                  "${fuel.toStringAsFixed(1)} L"),
+              Container(width: 1, height: 20, color: Colors.grey.shade300),
+              _buildPillMetric(Icons.pause_circle_filled_rounded, Colors.red, "STOPS", "$stops"),
+            ]),
+          ),
+
+          const SizedBox(height: 24),
+
+          // Action Buttons
+          Row(children: [
+            Expanded(
+              child: _buildSecondaryButton(
+                  "HISTORY", Icons.history_rounded, () => _showHistoryOverlay(context, tid)),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 2,
+              child: _buildPrimaryButton(
+                isPathVisible ? "HIDE PATH" : "COMPARE PATH", 
+                Icons.near_me_rounded, 
+                isPathVisible ? Colors.orange : const Color(0xFF00796B), 
+                () => _togglePath(tid)
+              ),
+            ),
+          ]),
+
+          const SizedBox(height: 20),
+
+          // Footer
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            _buildFooterInfo(Icons.access_time_rounded, "Last Update: $lastUpdate"),
+            _buildFooterInfo(null, "Start: --:--"),
+            _buildFooterInfo(null, "ETA: $eta", isTeal: true),
+          ]),
+        ])),
+    );
+  }
+
+
+  void _showHistoryOverlay(BuildContext context, String truckId) {
+    final List<Map<dynamic, dynamic>> history = _lastRoutePoints[truckId] ?? [];
+    final bool isMobile = MediaQuery.of(context).size.width < 900;
+    bool isModalLoading = true;
+
+    Widget contentBody(ScrollController scrollController, StateSetter setModalState) {
+      if (isModalLoading) {
+        Future.delayed(const Duration(milliseconds: 800), () {
+          if (mounted) setModalState(() => isModalLoading = false);
+        });
+      }
+
+      return Container(
+        padding: const EdgeInsets.fromLTRB(32, 32, 32, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text("Activity History", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
+                IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close_rounded))
+              ],
+            ),
+            const Padding(
+              padding: EdgeInsets.only(top: 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text("Recent route telemetry and collection history.", style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500)),
+              ),
+            ),
+            const Divider(height: 40),
+            if (isModalLoading)
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 40),
+                  child: Column(
+                    children: [
+                      const CircularProgressIndicator(color: Color(0xFF00897B), strokeWidth: 3),
+                      const SizedBox(height: 16),
+                      Text("Loading unit telemetry...", style: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w600, fontSize: 13)),
+                    ],
+                  ),
+                ),
+              )
+            else
+              Flexible(
+                child: history.isEmpty
+                    ? const Padding(padding: EdgeInsets.all(40), child: Center(child: Text("No history data recorded yet.", style: TextStyle(color: Colors.grey))))
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: history.length > 10 ? 10 : history.length,
+                        itemBuilder: (context, index) {
+                          final point = history.reversed.toList()[index];
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(color: const Color(0xFFF8F9FA), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.grey.shade100)),
+                            child: Row(children: [
+                              Container(width: 8, height: 8, decoration: BoxDecoration(color: (point['color'] == 'PINK' ? Colors.pink : const Color(0xFF00796B)), shape: BoxShape.circle)),
+                              const SizedBox(width: 16),
+                              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text("At ${point['purok'] ?? 'Balintawak'}", style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13)),
+                                Text("Recorded at ${DateFormat('h:mm a').format(DateTime.fromMillisecondsSinceEpoch(point['timestamp'] as int))}", style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                              ])),
+                            ]),
+                          );
+                        },
+                      ),
+              ),
+          ],
+        ),
+      );
+    }
+
+    if (isMobile) {
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setModalState) {
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 400),
+              curve: Curves.easeInOut,
+              decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * (isModalLoading ? 0.5 : 0.8),
+              ),
+              child: contentBody(ScrollController(), setModalState),
+            );
+          },
+        ),
+      );
+    } else {
+      showDialog(
+        context: context,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setModalState) {
+            return Dialog(
+              backgroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 400),
+                curve: Curves.easeInOut,
+                width: 450,
+                height: isModalLoading ? 380 : 600,
+                child: contentBody(ScrollController(), setModalState),
               ),
             );
           },
         ),
-      ),
+      );
+    }
+  }
+
+  Widget _buildPillMetric(IconData icon, Color color, String label, String value) {
+    return Column(children: [
+      Row(children: [Icon(icon, size: 12, color: color), const SizedBox(width: 4), Text(label, style: const TextStyle(fontSize: 9, color: Colors.grey, fontWeight: FontWeight.w800))]),
+      const SizedBox(height: 4),
+      Text(value, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
     ]);
   }
 
-  Widget _buildHeader() {
-    return Positioned(
-      top: 0,
-      left: 0,
-      right: 0,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))],
-        ),
-        child: SafeArea(
-          child: Row(children: [
-            if (!widget.isEmbedded || widget.onBack != null) ...[
-              IconButton(
-                icon: const Icon(Icons.arrow_back, color: Color(0xFF1A1A1A)),
-                onPressed: () {
-                  if (widget.onBack != null) {
-                    widget.onBack!();
-                  } else {
-                    Navigator.pop(context);
-                  }
-                },
-              ),
-              const SizedBox(width: 12),
-            ],
-            const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text("Track Fleet", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
-              Text("Real-time GPS status", style: TextStyle(fontSize: 12, color: Color(0xFF757575), fontWeight: FontWeight.w500)),
-            ]),
-          ]),
-        ),
-      ),
-    );
+  Widget _buildFooterInfo(IconData? icon, String text, {bool isTeal = false}) {
+    return Row(children: [
+      if (icon != null) Icon(icon, size: 12, color: Colors.grey),
+      if (icon != null) const SizedBox(width: 4),
+      Text(text, style: TextStyle(fontSize: 10, color: isTeal ? const Color(0xFF00796B) : Colors.grey, fontWeight: FontWeight.w700)),
+    ]);
   }
 
-  Widget _buildRouteProgress(bool isDesktop) {
-    double progress = 0.0;
-    if (_trucks.isNotEmpty) {
-      final int active = _trucks.where((t) => t['isOnline'] == true).length;
-      progress = active > 0 ? 0.3 : 0.0;
-    }
-    return Positioned(
-      top: widget.isEmbedded ? 68 : 96,
-      left: 0,
-      right: 0,
-      child: LinearProgressIndicator(
-        value: progress,
-        backgroundColor: const Color(0xFFE0E0E0),
-        valueColor: const AlwaysStoppedAnimation(Color(0xFF2196F3)),
-        minHeight: 4,
-      ),
-    );
-  }
 
-  Widget _buildFleetStatusContent(ScrollController? scrollController, {bool isMobile = false}) {
-    return ListView(
-      controller: scrollController,
-      physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-      padding: EdgeInsets.zero,
-      children: [
-        if (isMobile) const SizedBox(height: 12),
-        if (isMobile)
-          Center(
-            child: Container(
-              width: 60,
-              height: 8,
-              decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(10)),
-            ),
-          ),
-        const SizedBox(height: 24),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 28),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text("Fleet Status", style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A), letterSpacing: -0.5)),
-              Icon(Icons.local_shipping_rounded, color: Colors.grey),
-            ],
-          ),
-        ),
-        const SizedBox(height: 20),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Column(
-            children: _trucks.isEmpty
-                ? [
-                    const Padding(
-                      padding: EdgeInsets.all(60),
-                      child: Center(child: Text("Scanning for active units...", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w500))),
-                    ),
-                  ]
-                : _trucks.where((t) => t['isOnline'] == true).map((truck) => _buildDetailedTruckCard(truck)).toList(),
-          ),
-        ),
-        const SizedBox(height: 120),
-      ],
-    );
-  }
 
-  Widget _buildDetailedTruckCard(Map<dynamic, dynamic> truck) {
-    final String driverId = truck['driver_id']?.toString() ?? "";
-    final String assignedTruckId = _driverCurrentTrucks[driverId] ?? truck['truck_id'] ?? truck['internal_id'] ?? "Unknown";
-    
-    // The ID we display should be the one CURRENTLY assigned to the driver
-    final String id = assignedTruckId;
-    final String internalId = (truck['internal_id'] ?? id).toString();
-    
-    final String status = (truck['status'] ?? "Idle").toString().toUpperCase();
-    final String driver = (truck['driver_name'] ?? truck['driverName'] ?? "Unknown Driver").toString();
-    
-    // Resolve plate number from metadata cache using the AUTHORITATIVE ID
-    final String plateNumber = _truckPlates[id.toUpperCase()] ?? 
-                         (truck['plate_number'] ?? truck['plateNumber'] ?? "N/A").toString();
-
-    final String location = (truck['purok'] ?? "Balintawak").toString();
-    final String speed = "${truck['speed']?.toString() ?? "0"} km/h";
-    final double distVal = double.tryParse(truck['distance_covered']?.toString() ?? "0.0") ?? 0.0;
-    final String distance = "${distVal.toStringAsFixed(1)} km";
-    final String lastUpdate = (truck['last_update'] ?? "Just now").toString();
-    final bool isHistoryVisible = _visiblePaths.contains(internalId);
-    final bool isSelected = _selectedTruckId == internalId;
-    final Color statusColor = status == 'FULL' ? const Color(0xFFFF1744) : (status == 'ACTIVE' ? const Color(0xFF4CAF50) : const Color(0xFFFFAB00));
-    
-    return GestureDetector(
-      onTap: () => _toggleTrack(internalId, (truck['latitude'] ?? 13.9402).toDouble(), (truck['longitude'] ?? 121.1638).toDouble()),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 20),
-        padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(32),
-          boxShadow: [
-            BoxShadow(color: isSelected ? Colors.blue.withAlpha(40) : Colors.black.withAlpha(5), blurRadius: 10, offset: const Offset(0, 4)),
-          ],
-          border: Border.all(color: isSelected ? Colors.blue : const Color(0xFFF5F5F5), width: isSelected ? 2 : 1),
-        ),
-        child: Column(children: [
-          Row(children: [
-            Container(width: 52, height: 52, decoration: BoxDecoration(color: const Color(0xFFE3F2FD), borderRadius: BorderRadius.circular(16)), child: const Icon(Icons.local_shipping_rounded, color: Color(0xFF1976D2), size: 28)),
-            const SizedBox(width: 16),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(id, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: Color(0xFF1A1A1A))), Text(lastUpdate, style: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 13, fontWeight: FontWeight.w600))])),
-            Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6), decoration: BoxDecoration(color: statusColor.withAlpha(30), borderRadius: BorderRadius.circular(12)), child: Text(status, style: TextStyle(color: statusColor, fontSize: 11, fontWeight: FontWeight.w900))),
-          ]),
-          const SizedBox(height: 24),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            _buildInfoItem(Icons.location_on_rounded, const Color(0xFFFF1744), "Location", location), 
-            _buildInfoItem(Icons.refresh_rounded, const Color(0xFF03A9F4), "Speed", speed), 
-            _buildInfoItem(Icons.badge_rounded, Colors.orange, "Plate", plateNumber),
-          ]),
-          const SizedBox(height: 16),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            _buildInfoItem(Icons.person_rounded, const Color(0xFF1976D2), "Driver", driver),
-          ]),
-          const SizedBox(height: 24),
-          Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFFF8F9FA), borderRadius: BorderRadius.circular(20)), child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [_buildStatItem(Icons.local_shipping_outlined, "DISTANCE", distance, const Color(0xFF2E7D32))])),
-          const SizedBox(height: 24),
-          Row(children: [
-            Expanded(child: _buildSecondaryButton(
-              _followedTruckId == internalId ? "TRACKING" : "TRACK TRUCK", 
-              _followedTruckId == internalId ? Icons.gps_fixed : Icons.center_focus_strong_rounded, 
-              () => _toggleTrack(internalId, (truck['latitude'] ?? 13.9402).toDouble(), (truck['longitude'] ?? 121.1638).toDouble()),
-            )),
-            const SizedBox(width: 12),
-            Expanded(child: _buildPrimaryButton(
-              isHistoryVisible ? "HIDE PATH" : "PATH", 
-              Icons.insights_rounded, 
-              isHistoryVisible ? const Color(0xFFFFA726) : const Color(0xFF00BFA5), 
-              () => _togglePath(internalId),
-            )),
-          ]),
-        ]),
-      ),
-    );
+  Widget _buildMetricsInfo(IconData icon, Color color, String label, String value) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [Icon(icon, size: 12, color: color), const SizedBox(width: 4), Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w700))]),
+      const SizedBox(height: 4),
+      Text(value, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: Color(0xFF1A1A1A))),
+    ]);
   }
 
   Widget _buildSecondaryButton(String label, IconData icon, VoidCallback onTap) {
-    return ElevatedButton.icon(
-      onPressed: onTap,
-      icon: Icon(icon, size: 16),
-      label: Text(label, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
-      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFF5F5F5), foregroundColor: const Color(0xFF1A1A1A), elevation: 0, padding: const EdgeInsets.symmetric(vertical: 18), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-    );
+    return GestureDetector(onTap: onTap, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: const Color(0xFFF0F2F5), borderRadius: BorderRadius.circular(16)), alignment: Alignment.center, child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(icon, color: const Color(0xFF1A1A1A), size: 16), const SizedBox(width: 8), Text(label, style: const TextStyle(color: Color(0xFF1A1A1A), fontWeight: FontWeight.w900, fontSize: 12))])));
   }
 
   Widget _buildPrimaryButton(String label, IconData icon, Color color, VoidCallback onTap) {
-    return ElevatedButton.icon(
-      onPressed: onTap,
-      icon: Icon(icon, size: 16),
-      label: Text(label, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
-      style: ElevatedButton.styleFrom(backgroundColor: color, foregroundColor: Colors.white, elevation: 6, shadowColor: color.withAlpha(100), padding: const EdgeInsets.symmetric(vertical: 18), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-    );
+    return GestureDetector(onTap: onTap, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: LinearGradient(colors: [color.withOpacity(0.8), color]), borderRadius: BorderRadius.circular(16), boxShadow: [BoxShadow(color: color.withAlpha(60), blurRadius: 10, offset: const Offset(0, 4))]), alignment: Alignment.center, child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(icon, color: Colors.white, size: 16), const SizedBox(width: 8), Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 12))])));
   }
 
   void _togglePath(String truckId) {
-    if (!_visiblePaths.contains(truckId) && !_lastRoutePoints.containsKey(truckId)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("No active route available for this truck.")),
-      );
-      return;
-    }
-
     setState(() {
-      if (_visiblePaths.contains(truckId)) {
-        _visiblePaths.remove(truckId);
-        _clearSharedRoute(truckId);
-      } else {
+      if (_visiblePaths.contains(truckId)) { 
+        _visiblePaths.remove(truckId); 
+        _clearSharedRoute(truckId); 
+        CustomNotification.showTopNotification(context, "Path hidden for unit $truckId", false);
+      } 
+      else {
         _visiblePaths.add(truckId);
-        if (_lastRoutePoints.containsKey(truckId)) {
-          if (!kIsWeb) {
-            _updateSharedRoutePolyline(truckId, _lastRoutePoints[truckId]!);
-          } else {
-            _updateWebSharedRoute(truckId, _lastRoutePoints[truckId]!);
-          }
-        }
+        if (_lastRoutePoints.containsKey(truckId)) _updateSharedRoutePolyline(truckId, _lastRoutePoints[truckId]!);
+        CustomNotification.showTopNotification(context, "Comparing path for unit $truckId", false);
       }
     });
-  }
-
-  Widget _buildInfoItem(IconData icon, Color color, String label, String value) {
-    return Expanded(
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Icon(icon, size: 14, color: color),
-          const SizedBox(width: 4),
-          Text(label, style: const TextStyle(fontSize: 11, color: Color(0xFFBDBDBD), fontWeight: FontWeight.w600)),
-        ]),
-        const SizedBox(height: 4),
-        Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
-      ]),
-    );
-  }
-
-  Widget _buildStatItem(IconData icon, String label, String value, Color color) {
-    return Column(children: [
-      Row(children: [
-        Icon(icon, size: 12, color: const Color(0xFF757575)),
-        const SizedBox(width: 4),
-        Text(label, style: const TextStyle(fontSize: 9, color: Color(0xFF757575), fontWeight: FontWeight.w800)),
-      ]),
-      const SizedBox(height: 4),
-      Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: color)),
-    ]);
   }
 }
 
-class WebPathPainter extends CustomPainter {
-  final Map<String, List<Map<String, dynamic>>> heatmapData;
-  final Map<String, List<Offset>> heatmapPixels;
-  final Map<String, List<Map<String, dynamic>>> sharedRouteData; 
-  final Map<String, List<Offset>> sharedRoutePixels; 
-  final Map<String, List<Offset>> optimizedPixels;
+class _HoverZoomCard extends StatefulWidget {
+  final Widget child; final VoidCallback? onTap; final double scale;
+  const _HoverZoomCard({required this.child, this.onTap, this.scale = 1.02});
+  @override
+  State<_HoverZoomCard> createState() => _HoverZoomCardState();
+}
+class _HoverZoomCardState extends State<_HoverZoomCard> {
+  bool _active = false;
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(onEnter: (_) => setState(() => _active = true), onExit: (_) => setState(() => _active = false), cursor: SystemMouseCursors.click, child: GestureDetector(onTap: widget.onTap, onTapDown: (_) => setState(() => _active = true), onTapUp: (_) => setState(() => _active = false), child: AnimatedScale(scale: _active ? widget.scale : 1.0, duration: const Duration(milliseconds: 200), child: widget.child)));
+  }
+}
 
-  WebPathPainter({
-    required this.heatmapData, 
-    required this.heatmapPixels, 
-    required this.sharedRouteData,
-    required this.sharedRoutePixels,
-    required this.optimizedPixels
+class _StickyHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final Widget child;
+  final double minHeight;
+  final double maxHeight;
+
+  _StickyHeaderDelegate({
+    required this.child,
+    required this.minHeight,
+    required this.maxHeight,
   });
 
   @override
-  void paint(Canvas canvas, Size size) {
-    heatmapPixels.forEach((truckId, pixels) {
-      if (pixels.length < 2) return;
-      final data = heatmapData[truckId];
-      if (data == null) return;
-      for (int i = 0; i < pixels.length - 1; i++) {
-        final double speed = data[i + 1]['speed'] ?? 0;
-        final paint = Paint()..strokeWidth = 4.0..strokeCap = StrokeCap.round..style = PaintingStyle.stroke..color = speed < 5 ? Colors.red : (speed < 15 ? Colors.yellow : Colors.green);
-        canvas.drawLine(pixels[i], pixels[i+1], paint);
-      }
-    });
-
-    sharedRoutePixels.forEach((truckId, pixels) {
-      if (pixels.length < 2) return;
-      final data = sharedRouteData[truckId];
-      if (data == null || data.length != pixels.length) return;
-
-      Color lastColor = Colors.transparent;
-      Path currentPath = Path();
-      bool pathStarted = false;
-
-      for (int i = 0; i < pixels.length - 1; i++) {
-        final String colorName = (data[i + 1]['color'] ?? 'GREEN').toString().toUpperCase();
-        Color color = const Color(0xFF4CAF50); // Material Green
-        if (colorName == "YELLOW") color = const Color(0xFFFFEB3B); // Material Yellow
-        else if (colorName == "PINK") color = const Color(0xFFE91E63); // Material Pink
-        else if (colorName == "BLACK") color = const Color(0xFF212121); // Dark Grey
-        else if (colorName == "BLUE") color = const Color(0xFF2196F3); // Material Blue
-        
-        if (color != lastColor) {
-          // Finish previous colored path and start a new one from the SAME transition point
-          if (pathStarted) {
-            final paint = Paint()
-              ..strokeWidth = 8.0
-              ..strokeCap = StrokeCap.round
-              ..strokeJoin = StrokeJoin.round
-              ..style = PaintingStyle.stroke
-              ..color = lastColor.withValues(alpha: 0.85);
-            canvas.drawPath(currentPath, paint);
-          }
-          currentPath = Path();
-          currentPath.moveTo(pixels[i].dx, pixels[i].dy); // Start at previous end
-          currentPath.lineTo(pixels[i+1].dx, pixels[i+1].dy);
-          lastColor = color;
-          pathStarted = true;
-        } else {
-          if (!pathStarted) {
-            currentPath.moveTo(pixels[i].dx, pixels[i].dy);
-            pathStarted = true;
-            lastColor = color;
-          }
-          currentPath.lineTo(pixels[i+1].dx, pixels[i+1].dy);
-        }
-      }
-      
-      if (pathStarted) {
-        final paint = Paint()
-          ..strokeWidth = 8.0
-          ..strokeCap = StrokeCap.round
-          ..strokeJoin = StrokeJoin.round
-          ..style = PaintingStyle.stroke
-          ..color = lastColor.withValues(alpha: 0.85);
-        canvas.drawPath(currentPath, paint);
-      }
-    });
-
-    optimizedPixels.forEach((truckId, pixels) {
-      if (pixels.length < 2) return;
-      final paint = Paint()..color = Colors.blue.withValues(alpha: 0.5)..strokeWidth = 8.0..strokeCap = StrokeCap.round..style = PaintingStyle.stroke;
-      final path = Path(); path.moveTo(pixels[0].dx, pixels[0].dy);
-      for (int i = 1; i < pixels.length; i++) path.lineTo(pixels[i].dx, pixels[i].dy);
-      canvas.drawPath(path, paint);
-    });
+  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return SizedBox.expand(child: child);
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  double get maxExtent => maxHeight;
+
+  @override
+  double get minExtent => minHeight;
+
+  @override
+  bool shouldRebuild(_StickyHeaderDelegate oldDelegate) {
+    return maxHeight != oldDelegate.maxHeight ||
+        minHeight != oldDelegate.minHeight ||
+        child != oldDelegate.child;
+  }
 }

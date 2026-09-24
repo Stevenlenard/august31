@@ -11,6 +11,7 @@ import '../utils/app_theme.dart';
 import '../utils/session_manager.dart';
 import '../models/user.dart';
 import '../widgets/fade_slide_entrance.dart';
+import '../services/truck_assignment_service.dart';
 
 class DriverTrackTruckScreen extends StatefulWidget {
   final bool isEmbedded;
@@ -20,6 +21,15 @@ class DriverTrackTruckScreen extends StatefulWidget {
   final geo.Position? manualPosition;
   final bool isSimulation;
   final List<Map>? testRoute; 
+  final bool isHistorical; 
+  final bool isMiniMap;
+  final double? currentDistance;
+  final double? currentSpeed;
+  final String? startTime;
+
+  final DateTime? lastGpsUpdateTime;
+  final VoidCallback? onOptimize;
+  final bool isOptimizing;
   
   const DriverTrackTruckScreen({
     super.key, 
@@ -30,14 +40,28 @@ class DriverTrackTruckScreen extends StatefulWidget {
     this.manualPosition,
     this.isSimulation = false,
     this.testRoute,
+    this.isHistorical = false,
+    this.isMiniMap = false,
+    this.currentDistance,
+    this.currentSpeed,
+    this.startTime,
+    this.lastGpsUpdateTime,
+    this.onOptimize,
+    this.isOptimizing = false,
   });
+
+
+
 
   @override
   State<DriverTrackTruckScreen> createState() => _DriverTrackTruckScreenState();
 }
 
-class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
+class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> with TickerProviderStateMixin {
+  final DraggableScrollableController _sheetController = DraggableScrollableController();
   final FirebaseDatabase _database = FirebaseDatabase.instance;
+
+
   MapboxMap? mapboxMap;
   UserData? _user;
   
@@ -50,6 +74,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   StreamSubscription? _routeSubscription;
   StreamSubscription? _routeMetaSubscription;
   StreamSubscription? _localGpsSubscription;
+  StreamSubscription? _optimizedRouteSubscription;
   
   Map<dynamic, dynamic>? _lastTruckData;
   geo.Position? _lastLocalPos;
@@ -59,16 +84,21 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   bool _managersReady = false;
   bool _driverSourceCreated = false;
   bool _routeSourceCreated = false;
+  bool _optimizedRouteSourceCreated = false;
   bool _specialMarkersCreated = false;
+  bool _optimizedMarkersCreated = false;
   
   // LIVE DRIVER MARKERS
   PointAnnotation? _liveDriverLabel;
 
   // Session Meta Persistence
   Map? _lastSessionData;
+  Map? _optimizedRouteData;
 
   // Follow Mode State
   bool _isFollowLocked = true;
+  bool _isTargetActive = false;
+  bool _isMapActive = false;
   String _currentStatus = "ACTIVE";
   String? _truckPlateNumber;
   StreamSubscription? _truckMetaSubscription;
@@ -77,30 +107,153 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   String _startTime = "--:--";
   double _distance = 0.0;
   double _currentSpeed = 0.0;
+
+  // Refresh Animation State
+  bool _isRefreshing = false;
+  late AnimationController _refreshRotationController;
+
+  DateTime? _lastGpsUpdateTime;
   String _currentTime = "";
+
   Timer? _clockTimer;
+
+  bool _isFleetPanelVisible = true;
+  bool _isDataLoading = true;
+  bool _isDataExpanded = false;
 
   @override
   void initState() {
     super.initState();
+    _refreshRotationController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    );
     _loadUser();
-    _startClock();
+    if (!widget.isHistorical) {
+      _startClock();
+    }
     if (widget.manualPosition != null) {
       _lastLocalPos = widget.manualPosition;
     }
-    _checkPermissionAndStartGps();
-    _listenToTrucks();
+    if (widget.currentDistance != null) _distance = widget.currentDistance!;
+    if (widget.currentSpeed != null) _currentSpeed = widget.currentSpeed!;
+    if (widget.startTime != null) _startTime = widget.startTime!;
+    if (widget.lastGpsUpdateTime != null) _lastGpsUpdateTime = widget.lastGpsUpdateTime!;
+
+    if (!widget.isHistorical) {
+
+
+
+      _checkPermissionAndStartGps();
+      _listenToTrucks();
+    }
     _listenToTruckMeta();
     _listenToRoute();
+
+    // Initial Data Loading Animation (Match Resident Experience)
+    _isDataLoading = true;
+    _isDataExpanded = false;
+    Future.delayed(const Duration(milliseconds: 1000), () {
+      if (mounted) {
+        setState(() {
+          _isDataLoading = false;
+          Future.delayed(const Duration(milliseconds: 50), () => setState(() => _isDataExpanded = true));
+        });
+      }
+    });
   }
 
   void _loadUser() async {
     _user = await SessionManager.getUser();
+    if (_user != null) {
+      final resolved = await TruckAssignmentService.resolveDriverTruckAssignment(_user!);
+      if (resolved != null) {
+        _user = _user!.copyWith(preferredTruck: resolved.truckId);
+        if (resolved.plateNumber.isNotEmpty) {
+          _truckPlateNumber = resolved.plateNumber;
+        }
+        debugPrint("========== DRIVER MAP/TRIP DETAILS RECEIVED ASSIGNMENT ==========");
+        debugPrint("[DriverTrackTruckScreen]");
+        debugPrint("driverId: ${_user!.userId}");
+        debugPrint("preferredTruck: ${resolved.truckId}");
+        debugPrint("resolvedTruckId: ${resolved.truckId}");
+        debugPrint("resolvedTruckNumber: ${resolved.truckNumber}");
+        debugPrint("resolvedPlateNumber: ${resolved.plateNumber}");
+        debugPrint("=================================================================");
+      }
+    }
     if (mounted) {
       setState(() {});
       _listenToTruckMeta();
     }
     _setupUserListener();
+  }
+
+  void _handleManualRefresh() async {
+    if (_isRefreshing) return;
+    
+    setState(() => _isRefreshing = true);
+    _refreshRotationController.repeat();
+    
+    try {
+      // 1. Force re-load metadata
+      _listenToTruckMeta();
+      
+      // 2. Clear and re-fetch markers/layers
+      if (_managersReady) {
+        _pointAnnotationManager?.deleteAll();
+        _truckMarkers.clear();
+        _driverSourceCreated = false;
+        _routeSourceCreated = false;
+        _specialMarkersCreated = false;
+      }
+
+      // 3. UI Feedback (Centered White Box)
+      if (mounted) {
+        showDialog(
+          context: context,
+          barrierColor: Colors.black.withOpacity(0.1),
+          barrierDismissible: false,
+          builder: (context) {
+            Future.delayed(const Duration(milliseconds: 1500), () {
+              if (Navigator.canPop(context)) Navigator.pop(context);
+            });
+            return Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(32),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 15, offset: const Offset(0, 5))
+                  ],
+                ),
+                child: const Material(
+                  color: Colors.transparent,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.check_circle_rounded, color: Colors.green, size: 20),
+                      SizedBox(width: 12),
+                      Text("Map tracking synchronized", style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: Color(0xFF1A1A1A))),
+                    ],
+
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      }
+    } catch (e) {
+      debugPrint("Refresh error: $e");
+    } finally {
+      if (mounted) {
+        _refreshRotationController.stop();
+        _refreshRotationController.reset();
+        setState(() => _isRefreshing = false);
+      }
+    }
   }
 
   void _setupUserListener() {
@@ -112,7 +265,14 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         if (mounted) {
           setState(() {
             final Map<String, dynamic> currentData = _user!.toJson();
-            data.forEach((k, v) => currentData[k] = v);
+            data.forEach((k, v) {
+              if ((k == 'preferred_truck' || k == 'preferredTruck') &&
+                  (v == null || v.toString().trim().isEmpty || v.toString() == "None" || v.toString() == "Unknown")) {
+                // Keep existing valid preferredTruck in memory if Firebase payload is empty
+              } else {
+                currentData[k] = v;
+              }
+            });
             _user = UserData.fromJson(currentData);
           });
           _listenToTruckMeta(); // Refresh plate number if assignment changed
@@ -155,32 +315,63 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
       _lastLocalPos = widget.manualPosition;
       _updateLocalDriverMarker(widget.manualPosition!);
     }
+    if (oldWidget.currentDistance != widget.currentDistance && widget.currentDistance != null) {
+      setState(() => _distance = widget.currentDistance!);
+    }
+    if (oldWidget.currentSpeed != widget.currentSpeed && widget.currentSpeed != null) {
+      setState(() => _currentSpeed = widget.currentSpeed!);
+    }
+    if (oldWidget.startTime != widget.startTime && widget.startTime != null) {
+      setState(() => _startTime = widget.startTime!);
+    }
+    if (oldWidget.lastGpsUpdateTime != widget.lastGpsUpdateTime && widget.lastGpsUpdateTime != null) {
+      setState(() => _lastGpsUpdateTime = widget.lastGpsUpdateTime!);
+    }
   }
+
+
 
   void _listenToTruckMeta() {
     _truckMetaSubscription?.cancel();
     final String? currentAssignedTruck = _user?.preferredTruck;
     final String tid = (widget.focusTruckId ?? currentAssignedTruck ?? "Unknown").toUpperCase();
     
+    if (tid == "UNKNOWN" || tid.isEmpty) {
+      debugPrint("[TRUCK_RESOLUTION_FAILED] DriverTrackTruckScreen: truckId is Unknown/empty");
+      return;
+    }
+
     _truckMetaSubscription = _database.ref('trucks/$tid').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
         final data = event.snapshot.value as Map;
-        if (mounted) {
+        final String? plate = data['plateNumber']?.toString() ?? data['plate_number']?.toString();
+        debugPrint("[CURRENT_TRUCK_METADATA]");
+        debugPrint("truckId: $tid");
+        debugPrint("truckNumber: $tid");
+        debugPrint("plateNumber: ${plate ?? 'MISSING'}");
+        debugPrint("sourcePath: trucks/$tid");
+        if (mounted && plate != null && plate.isNotEmpty) {
           setState(() {
-            _truckPlateNumber = data['plateNumber']?.toString();
+            _truckPlateNumber = plate;
           });
         }
+      } else {
+        debugPrint("[TRUCK_RESOLUTION_FAILED]");
+        debugPrint("path: trucks/$tid");
       }
     });
   }
 
   @override
   void dispose() {
+    _refreshRotationController.dispose();
     _clockTimer?.cancel();
+
     _truckSubscription?.cancel();
     _userSubscription?.cancel();
     _truckMetaSubscription?.cancel();
     _routeSubscription?.cancel();
+    _optimizedRouteSubscription?.cancel();
     _routeMetaSubscription?.cancel();
     _localGpsSubscription?.cancel();
     super.dispose();
@@ -225,18 +416,11 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     _truckSubscription = _database.ref('truck_locations').onValue.listen((event) {
       if (event.snapshot.exists && event.snapshot.value != null) {
         _lastTruckData = event.snapshot.value as Map;
-        
-        // DEBUG STALE RECORDS
-        bool oldGT001Found = _lastTruckData!.containsKey("GT-001");
-        bool gt007Found = _lastTruckData!.containsKey("GT-007");
-        debugPrint("LIVE RECORDS FOR DRIVER: ${_lastTruckData!.keys.toList()}");
-        debugPrint("OLD GT-001 LIVE RECORD FOUND: $oldGT001Found");
-        debugPrint("GT-007 LIVE RECORD FOUND: $gt007Found");
+        final int now = DateTime.now().millisecondsSinceEpoch;
 
         final String tid = (widget.focusTruckId ?? _user?.preferredTruck ?? "Unknown").toUpperCase();
         if (_lastTruckData!.containsKey(tid)) {
           final myData = _lastTruckData![tid] as Map;
-          debugPrint("SELECTED CURRENT LIVE RECORD: $tid -> $myData");
           final String newStatus = (myData['status'] ?? "ACTIVE").toString().toUpperCase();
           if (newStatus != _currentStatus) {
             if (mounted) setState(() => _currentStatus = newStatus);
@@ -246,11 +430,32 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
         if (_managersReady) {
           _lastTruckData!.forEach((key, value) {
-            _updateSingleTruckMarker(key.toString(), value as Map);
+            final val = value as Map;
+            final bool isOnlineField = val['isOnline'] == true;
+            final dynamic lastSeenRaw = val['lastSeen'];
+            final int lastSeen = lastSeenRaw is num ? lastSeenRaw.toInt() : 0;
+            
+            // 2-minute freshness window
+            final bool isFresh = lastSeen > 0 && (now - lastSeen).abs() < 120000;
+            
+            if (isOnlineField && isFresh) {
+              _updateSingleTruckMarker(key.toString(), val);
+            } else {
+              // Explicitly remove if stale or offline
+              _removeSingleTruckMarker(key.toString());
+            }
           });
         }
       }
     });
+  }
+
+  void _removeSingleTruckMarker(String id) {
+    if (_truckMarkers.containsKey(id)) {
+      final marker = _truckMarkers[id]!;
+      _pointAnnotationManager?.delete(marker);
+      _truckMarkers.remove(id);
+    }
   }
 
   void _listenToRoute() {
@@ -283,6 +488,10 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           if (mounted && points.isNotEmpty) {
             if (points.length != _lastPoints.length) {
               _updateRoutePolyline(points);
+              
+              if (widget.isHistorical && _lastPoints.isEmpty) {
+                _fitHistoricalRoute(points);
+              }
             }
             
             // PRIORITY: Use Firebase route points for historical polyline rendering,
@@ -295,6 +504,62 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         if (_managersReady) _updateSpecialMarkers(data);
       }
     });
+
+    _optimizedRouteSubscription?.cancel();
+    _optimizedRouteSubscription = _database.ref('driver_routes/${widget.currentSessionId}/optimized_route').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value != null) {
+        final Map data = event.snapshot.value as Map;
+        if (mounted) {
+          setState(() {
+            _optimizedRouteData = data;
+          });
+          if (_managersReady) {
+            _updateOptimizedRouteLayer(data);
+            _updateOptimizedMarkers(data);
+            
+            // Only fit camera if this is the first time loading the optimized route
+            // or if it was explicitly triggered.
+            _fitMapToOptimizedRoute(data);
+          }
+        }
+      } else {
+        if (mounted) {
+          setState(() => _optimizedRouteData = null);
+          _clearOptimizedRoute();
+        }
+      }
+    });
+  }
+
+  void _fitMapToOptimizedRoute(Map data) async {
+    if (data['stops'] == null || mapboxMap == null) return;
+    final List stops = data['stops'] as List;
+    if (stops.isEmpty) return;
+
+    final List<Point> points = [];
+    
+    // Include current position in bounds
+    if (_lastLocalPos != null) {
+      points.add(Point(coordinates: Position(_lastLocalPos!.longitude, _lastLocalPos!.latitude)));
+    }
+
+    for (var s in stops) {
+      double lat = (s['latitude'] ?? 0.0).toDouble();
+      double lng = (s['longitude'] ?? 0.0).toDouble();
+      if (lat != 0 && lng != 0) {
+        points.add(Point(coordinates: Position(lng, lat)));
+      }
+    }
+    
+    if (points.isNotEmpty) {
+      final camera = await mapboxMap!.cameraForCoordinates(
+        points, 
+        MbxEdgeInsets(top: 80, left: 50, bottom: 250, right: 50), // Standard padding for mobile UI
+        0, 0
+      );
+      
+      mapboxMap?.setCamera(camera);
+    }
   }
 
   void _onMapCreated(MapboxMap map) { mapboxMap = map; }
@@ -323,9 +588,14 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     if (_lastTruckData != null) _lastTruckData!.forEach((k, v) => _updateSingleTruckMarker(k.toString(), v as Map));
     if (_lastPoints.isNotEmpty) _updateRoutePolyline(_lastPoints);
     if (_lastSessionData != null) _updateSpecialMarkers(_lastSessionData!);
+    if (_optimizedRouteData != null) {
+      _updateOptimizedRouteLayer(_optimizedRouteData!);
+      _updateOptimizedMarkers(_optimizedRouteData!);
+    }
   }
 
   Future<void> _updateLocalDriverMarker(geo.Position pos) async {
+    if (widget.isHistorical) return;
     if (mapboxMap == null) return;
 
     final String sourceId = "driver-live-location-source";
@@ -516,6 +786,146 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     } catch (e) {}
   }
 
+  void _fitHistoricalRoute(List<Map> points) async {
+    if (points.isEmpty || mapboxMap == null) return;
+    
+    double? minLat, maxLat, minLng, maxLng;
+    for (var p in points) {
+      double lat = (p['lat'] ?? 0.0).toDouble();
+      double lng = (p['lng'] ?? 0.0).toDouble();
+      if (lat == 0 || lng == 0) continue;
+      
+      if (minLat == null || lat < minLat) minLat = lat;
+      if (maxLat == null || lat > maxLat) maxLat = lat;
+      if (minLng == null || lng < minLng) minLng = lng;
+      if (maxLng == null || lng > maxLng) maxLng = lng;
+    }
+    
+    if (minLat != null && maxLat != null && minLng != null && maxLng != null) {
+      if (_lastSessionData != null && _lastSessionData!['start_lat'] != null) {
+         double sLat = (_lastSessionData!['start_lat'] as num).toDouble();
+         double sLng = (_lastSessionData!['start_lng'] as num).toDouble();
+         if (sLat < minLat) minLat = sLat;
+         if (sLat > maxLat) maxLat = sLat;
+         if (sLng < minLng) minLng = sLng;
+         if (sLng > maxLng) maxLng = sLng;
+      }
+
+      final centerLat = (minLat + maxLat) / 2;
+      final centerLng = (minLng + maxLng) / 2;
+      
+      mapboxMap?.setCamera(CameraOptions(
+        center: Point(coordinates: Position(centerLng, centerLat)),
+        zoom: 14.5,
+      ));
+    }
+  }
+
+  void _updateOptimizedRouteLayer(Map data) async {
+    if (mapboxMap == null || data['geometry'] == null) return;
+    final String sourceId = "optimized-route-source";
+    
+    try {
+      final style = mapboxMap!.style;
+      final geometry = jsonDecode(data['geometry'] as String);
+      final geojson = {
+        "type": "Feature",
+        "geometry": geometry,
+        "properties": {}
+      };
+
+      bool sourceExists = await style.styleSourceExists(sourceId);
+      if (!sourceExists) {
+        await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(geojson)));
+        if (!(await style.styleLayerExists("optimized-route-layer"))) {
+          await style.addLayer(LineLayer(
+            id: "optimized-route-layer",
+            sourceId: sourceId,
+            lineColor: Colors.blue.toARGB32(),
+            lineWidth: 6.0,
+            lineOpacity: 0.8,
+            lineCap: LineCap.ROUND,
+            lineJoin: LineJoin.ROUND,
+            lineDasharray: [1.5, 1.5],
+          ));
+        }
+        if (mounted) setState(() => _optimizedRouteSourceCreated = true);
+      } else {
+        await style.setStyleSourceProperty(sourceId, "data", jsonEncode(geojson));
+      }
+    } catch (e) {}
+  }
+
+  void _updateOptimizedMarkers(Map data) async {
+    if (mapboxMap == null || data['stops'] == null) return;
+    final String sourceId = "optimized-stops-source";
+    final List stops = data['stops'] as List;
+    
+    final List<Map<String, dynamic>> features = [];
+    for (int i = 0; i < stops.length; i++) {
+      final s = stops[i];
+      features.add({
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [s['longitude'], s['latitude']]},
+        "properties": {
+          "label": "${s['sequence']}",
+          "name": s['area_name']
+        }
+      });
+    }
+
+    final geojson = {"type": "FeatureCollection", "features": features};
+
+    try {
+      final style = mapboxMap!.style;
+      bool sourceExists = await style.styleSourceExists(sourceId);
+      
+      if (!sourceExists) {
+        await style.addSource(GeoJsonSource(id: sourceId, data: jsonEncode(geojson)));
+        
+        if (!(await style.styleLayerExists("optimized-stops-circles"))) {
+          await style.addLayer(CircleLayer(
+            id: "optimized-stops-circles", sourceId: sourceId, 
+            circleRadius: 10.0, circleColor: Colors.blue.toARGB32(), 
+            circleStrokeWidth: 2.0, circleStrokeColor: Colors.white.toARGB32(),
+            circleSortKey: 4000.0,
+          ));
+        }
+        if (!(await style.styleLayerExists("optimized-stops-labels"))) {
+          await style.addLayer(SymbolLayer(
+            id: "optimized-stops-labels", sourceId: sourceId, 
+            textField: "{label}", textSize: 10.0, textColor: Colors.white.toARGB32(),
+            textAnchor: TextAnchor.CENTER, symbolSortKey: 4100.0,
+          ));
+        }
+        if (!(await style.styleLayerExists("optimized-stops-names"))) {
+          await style.addLayer(SymbolLayer(
+            id: "optimized-stops-names", sourceId: sourceId, 
+            textField: "{name}", textSize: 9.0, textColor: Colors.blue.toARGB32(),
+            textHaloColor: Colors.white.toARGB32(), textHaloWidth: 1.5,
+            textAnchor: TextAnchor.TOP, textOffset: [0, 1.2], symbolSortKey: 4200.0,
+          ));
+        }
+        if (mounted) setState(() => _optimizedMarkersCreated = true);
+      } else {
+        await style.setStyleSourceProperty(sourceId, "data", jsonEncode(geojson));
+      }
+    } catch (e) {}
+  }
+
+  void _clearOptimizedRoute() async {
+    if (mapboxMap == null) return;
+    try {
+      final style = mapboxMap!.style;
+      if (await style.styleSourceExists("optimized-route-source")) {
+        await style.setStyleSourceProperty("optimized-route-source", "data", jsonEncode({"type": "FeatureCollection", "features": []}));
+      }
+      if (await style.styleSourceExists("optimized-stops-source")) {
+        await style.setStyleSourceProperty("optimized-stops-source", "data", jsonEncode({"type": "FeatureCollection", "features": []}));
+      }
+    } catch (e) {}
+  }
+
   void _updateSingleTruckMarker(String id, Map data) {
     if (!_managersReady || _pointAnnotationManager == null) return;
     
@@ -582,7 +992,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
 
     allPoints.addAll(points);
 
-    if (_lastLocalPos != null) {
+    if (!widget.isHistorical && _lastLocalPos != null) {
       allPoints.add({
         'lat': _lastLocalPos!.latitude,
         'lng': _lastLocalPos!.longitude,
@@ -649,7 +1059,6 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
         final curr = processed[i];
         
         String color = (curr['color'] ?? 'GREEN').toString().toUpperCase();
-        if (color == "BLUE") color = "GREEN"; 
 
         if (features.isNotEmpty && features.last['properties']['color'] == color) {
           final List coords = features.last['geometry']['coordinates'];
@@ -687,6 +1096,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
           
           await style.setStyleLayerProperty("driver-route-layer", "line-color", [
             "match", ["get", "color"],
+            "BLUE", "#2196F3",
             "GREEN", "#4CAF50", 
             "YELLOW", "#FFEB3B", 
             "PINK", "#E91E63", 
@@ -748,43 +1158,45 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     );
   }
 
+
+  String _calculateEstimatedEnd() {
+    if (_startTime == "--:--" || _lastSessionData == null || widget.currentSessionId == null) {
+      return "--:--";
+    }
+    DateTime start;
+    if (_lastSessionData!['server_start_time'] != null) {
+      start = DateTime.fromMillisecondsSinceEpoch(_lastSessionData!['server_start_time'] as int);
+    } else if (_lastSessionData!['timestamp'] != null) {
+      start = DateTime.fromMillisecondsSinceEpoch(_lastSessionData!['timestamp'] as int);
+    } else {
+      start = DateTime.now();
+    }
+    final end = start.add(const Duration(hours: 4));
+    return DateFormat('h:mm a').format(end);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: FadeSlideEntrance(
-        child: Stack(
-          children: [
-            _buildMap(),
-            _buildFloatingHeader(),
-            if (!widget.isEmbedded) _buildLegend(),
-            _buildMapControls(),
-            
-            if (!widget.isEmbedded)
-              Positioned.fill(
-                child: DraggableScrollableSheet(
-                  initialChildSize: 0.18,
-                  minChildSize: 0.18,
-                  maxChildSize: 0.85,
-                  snap: true,
-                  snapSizes: const [0.18, 0.45, 0.85],
-                  builder: (context, scrollController) => PointerInterceptor(
-                    child: Container(
-                      decoration: const BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.vertical(top: Radius.circular(40)),
-                        boxShadow: [
-                          BoxShadow(color: Colors.black26, blurRadius: 25, spreadRadius: 5, offset: Offset(0, -5))
-                        ],
-                      ),
-                      child: _buildSwipeUpContent(scrollController),
-                    ),
-                  ),
-                ),
-              ),
-          ],
+    if (widget.isMiniMap) {
+      return _buildEmbeddedLayout();
+    }
+    return LayoutBuilder(builder: (context, constraints) {
+      final bool isDesktop = constraints.maxWidth >= 900;
+      return FadeSlideEntrance(
+        child: Scaffold(
+          backgroundColor: AppColors.dashboardBg,
+          body: isDesktop ? _buildDesktopLayout() : _buildMobileLayout(),
         ),
-      ),
+      );
+    });
+  }
+
+  Widget _buildEmbeddedLayout() {
+    return Stack(
+      children: [
+        Positioned.fill(child: _buildMap()),
+        _buildMapControls(bottom: 20),
+      ],
     );
   }
 
@@ -797,71 +1209,143 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   }
 
   Widget _buildSwipeUpContent(ScrollController scrollController) {
-    return ListView(
-      controller: scrollController,
-      physics: const BouncingScrollPhysics(),
-      padding: EdgeInsets.zero,
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double titleFontSize = (screenWidth * 0.055).clamp(18.0, 22.0);
+    final double subtitleFontSize = (screenWidth * 0.035).clamp(11.0, 13.0);
+
+    return Column(
       children: [
-        const SizedBox(height: 12),
-        Center(child: Container(width: 50, height: 6, decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)))),
-        const SizedBox(height: 32),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28),
+        // FIXED HEADER SECTION (Hindi sumasama sa scroll, parang sa resident view)
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onVerticalDragUpdate: (details) {
+            if (_sheetController.isAttached) {
+              _sheetController.jumpTo((_sheetController.size - details.delta.dy / MediaQuery.of(context).size.height).clamp(0.22, 0.85));
+            }
+          },
+          onVerticalDragEnd: (details) {
+            if (_sheetController.isAttached) {
+              final double current = _sheetController.size;
+              if (current < 0.35) {
+                _sheetController.animateTo(0.22, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+              } else if (current < 0.65) {
+                _sheetController.animateTo(0.45, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+              } else {
+                _sheetController.animateTo(0.85, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+              }
+            }
+          },
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                _lastSessionData == null ? "Searching Tracking..." : "Live Route Tracking", 
-                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))
+              const SizedBox(height: 12),
+              Center(
+                child: Container(
+                  width: 50,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(10)
+                  )
+                )
               ),
-              Text(
-                _lastSessionData == null ? "Establishing GPS connection" : "Tracking assigned truck", 
-                style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)
+              const SizedBox(height: 32),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 28),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _lastSessionData == null ? "Searching Tracking..." : "Trip Details", 
+                      style: TextStyle(fontSize: titleFontSize, fontWeight: FontWeight.w900, color: const Color(0xFF1A1A1A))
+                    ),
+
+                    Text(
+                      _lastSessionData == null ? "Establishing GPS connection" : "Tracking assigned truck", 
+                      style: TextStyle(fontSize: subtitleFontSize, color: Colors.grey, fontWeight: FontWeight.w600)
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+              Divider(height: 1, color: Colors.grey.shade100, thickness: 1),
+            ],
+          ),
+        ),
+        
+        // SCROLLABLE BODY CONTENT
+        Expanded(
+          child: ListView(
+            controller: scrollController,
+            physics: const BouncingScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(0, 20, 0, 120),
+            children: [
+              _buildInfoCard(
+                title: "Trip Information",
+                icon: Icons.info_outline_rounded,
+                color: AppColors.tealText,
+                content: [
+                  _buildInfoRow(
+                    "Truck Number",
+                    (_user?.preferredTruck != null && _user!.preferredTruck!.isNotEmpty && _user!.preferredTruck != "Unknown" && _user!.preferredTruck != "None")
+                        ? _user!.preferredTruck!
+                        : (widget.focusTruckId ?? "Unknown"),
+                    color: AppColors.tealText,
+                  ),
+                  const Divider(height: 24),
+                  _buildInfoRow(
+                    "Plate Number",
+                    (_truckPlateNumber != null && _truckPlateNumber!.isNotEmpty && _truckPlateNumber != "N/A")
+                        ? _truckPlateNumber!
+                        : (_lastSessionData?['plate_number']?.toString() ?? "N/A"),
+                    isBold: true,
+                  ),
+                  const Divider(height: 24),
+                  _buildInfoRow("Start Time", _startTime),
+                  const Divider(height: 24),
+                  _buildInfoRow("Estimated End", _calculateEstimatedEnd()),
+                  const Divider(height: 24),
+                  _buildInfoRow("Total Distance", "${_distance.toStringAsFixed(1)} km", color: Colors.orangeAccent.shade200),
+                ],
+              ),
+              
+              const SizedBox(height: 20),
+              
+              _buildInfoCard(
+                title: "GPS Status",
+                icon: Icons.gps_fixed_rounded,
+                color: Colors.green, 
+                content: [
+                  _buildGpsSignalRow(),
+                  const Divider(height: 24),
+                  _buildInfoRow("Accuracy", _lastLocalPos == null ? "Waiting for fix..." : "±${_lastLocalPos!.accuracy.toInt()} meters"),
+                  const Divider(height: 24),
+                  _buildInfoRow("Speed", "${_currentSpeed.toStringAsFixed(1)} km/h"),
+                  const Divider(height: 24),
+                  _buildInfoRow("Last Update", _lastGpsUpdateTime != null ? DateFormat('hh:mm:ss a').format(_lastGpsUpdateTime!) : (_lastLocalPos != null ? DateFormat('hh:mm:ss a').format(_lastLocalPos!.timestamp) : "Waiting...")),
+                ],
+
               ),
             ],
           ),
         ),
-        const SizedBox(height: 24),
-        
-        _buildInfoCard(
-          title: "Trip Information",
-          icon: Icons.info_outline_rounded,
-          color: AppColors.tealText,
-          content: [
-            _buildInfoRow("Truck Number", _user?.preferredTruck ?? "Unknown", color: AppColors.tealText),
-            const Divider(height: 24),
-            _buildInfoRow("Plate Number", _truckPlateNumber ?? "N/A", isBold: true),
-            const Divider(height: 24),
-            _buildInfoRow("Start Time", _startTime),
-            const Divider(height: 24),
-            _buildInfoRow("Total Distance", "${_distance.toStringAsFixed(1)} km", color: Colors.orangeAccent.shade200),
-          ],
-        ),
-        
-        const SizedBox(height: 20),
-        
-        _buildInfoCard(
-          title: "GPS Status",
-          icon: Icons.gps_fixed_rounded,
-          color: Colors.green, 
-          content: [
-            _buildGpsSignalRow(),
-            const Divider(height: 24),
-            _buildInfoRow("Accuracy", "±${_lastLocalPos?.accuracy.toInt() ?? 5} meters"),
-            const Divider(height: 24),
-            _buildInfoRow("Speed", "${_currentSpeed.toStringAsFixed(0)} km/h"),
-          ],
-        ),
-        
-        const SizedBox(height: 120),
       ],
     );
   }
 
-  Widget _buildInfoCard({required String title, required IconData icon, required Color color, required List<Widget> content}) {
+
+  Widget _buildInfoCard({required String title, required IconData icon, required Color color, required List<Widget> content, bool isDesktop = false}) {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double titleFontSize = isDesktop ? 18.0 : (screenWidth * 0.045).clamp(15.0, 18.0);
+
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 20),
-      padding: const EdgeInsets.all(28),
+      margin: EdgeInsets.symmetric(horizontal: isDesktop ? 16 : 20),
+      padding: EdgeInsets.fromLTRB(
+        isDesktop ? 24 : 28, // Left
+        isDesktop ? 24 : 28, // Top
+        isDesktop ? 24 : 28, // Right
+        isDesktop ? 40 : 36, // Increased Bottom Padding
+      ),
       decoration: BoxDecoration(
         color: Colors.white, 
         borderRadius: BorderRadius.circular(32),
@@ -875,7 +1359,7 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
             children: [
               Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
               const SizedBox(width: 12),
-              Text(title, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: color == Colors.black ? Colors.black : color.darken(0.3))),
+              Text(title, style: TextStyle(fontWeight: FontWeight.w900, fontSize: titleFontSize, color: color == Colors.black ? Colors.black : color.darken(0.3))),
             ],
           ),
           const SizedBox(height: 24),
@@ -886,16 +1370,20 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   }
 
   Widget _buildInfoRow(String label, String value, {Color? color, bool isBold = false}) {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double labelFontSize = (screenWidth * 0.035).clamp(12.0, 14.0);
+    final double valueFontSize = (screenWidth * 0.04).clamp(13.0, 15.0);
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label, style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: 14)),
+        Text(label, style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: labelFontSize)),
         Text(
           value,
           style: TextStyle(
             color: color ?? const Color(0xFF2C3E50),
             fontWeight: isBold ? FontWeight.w900 : FontWeight.w700,
-            fontSize: 15,
+            fontSize: valueFontSize,
           ),
         ),
       ],
@@ -903,23 +1391,31 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
   }
 
   Widget _buildGpsSignalRow() {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double labelFontSize = (screenWidth * 0.035).clamp(12.0, 14.0);
+    final double statusFontSize = (screenWidth * 0.035).clamp(11.0, 13.0);
+
+    bool isSearching = _lastLocalPos == null;
+    Color statusColor = isSearching ? Colors.orange : Colors.green;
+    String statusText = isSearching ? "Searching..." : "Strong";
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        const Text("Signal Strength", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: 14)),
+        Text("Signal Strength", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: labelFontSize)),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
-            color: Colors.green.withValues(alpha: 0.1),
+            color: statusColor.withValues(alpha: 0.1),
             borderRadius: BorderRadius.circular(20), 
-            border: Border.all(color: Colors.green.withValues(alpha: 0.2)),
+            border: Border.all(color: statusColor.withValues(alpha: 0.2)),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Container(width: 6, height: 6, decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle)),
+              Container(width: 6, height: 6, decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle)),
               const SizedBox(width: 8),
-              const Text("Strong", style: TextStyle(fontWeight: FontWeight.w900, color: Colors.green, fontSize: 13)),
+              Text(statusText, style: TextStyle(fontWeight: FontWeight.w900, color: statusColor, fontSize: statusFontSize)),
             ],
           ),
         ),
@@ -927,47 +1423,243 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     );
   }
 
-  Widget _buildMapControls() {
+  Widget _buildMapControls({double bottom = 240}) {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final bool isDesktop = screenWidth >= 900;
+    
+    // Control sizes: smaller for mini-map to match Resident experience
+    final double btnSize = widget.isMiniMap 
+        ? 42.0 
+        : (isDesktop ? 56.0 : (screenWidth * 0.15).clamp(48.0, 60.0));
+    final double iconSize = widget.isMiniMap 
+        ? 20.0 
+        : (isDesktop ? 24.0 : (screenWidth * 0.065).clamp(22.0, 26.0));
+
+    final bool isSimplified = widget.isMiniMap;
+    // Tiyak na responsive na effectiveBottom gamit ang absolute pixel margin para sa desktop/web view upang mapababa ito nang maayos sa tabi ng Mapbox logo
+    final double effectiveBottom = widget.isMiniMap 
+        ? 12 
+        : (isDesktop 
+            ? 24.0 // Saktong-sakto na ibaba sa gilid ng Mapbox attribution text sa Desktop interface
+            : (widget.isEmbedded ? (MediaQuery.of(context).size.height * 0.26).clamp(190.0, 220.0) : (MediaQuery.of(context).size.height * 0.32).clamp(240.0, 270.0)));
+    
+    // Layout Logic:
+    // Web (Desktop) -> Kaliwa (LEFT)
+    // Mobile Full/Embedded Map Page -> Kanan (RIGHT) katulad ng sa resident view
+    // Mini Map (Dashboard) -> Kanan (RIGHT)
+    final double? effectiveLeft = isDesktop ? 24 : null;
+    final double? effectiveRight = isDesktop ? null : (widget.isMiniMap ? 12 : 20);
+
+
+
+
+
+
     return Positioned(
-      bottom: widget.isEmbedded ? 20 : 160, 
-      right: 20,
+      bottom: effectiveBottom,
+      left: effectiveLeft,
+      right: effectiveRight,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _HoverZoomLink(
+          _buildMapControlButton(
+            icon: _isFollowLocked ? Icons.gps_fixed_rounded : Icons.gps_not_fixed_rounded,
+            isActive: _isFollowLocked || _isTargetActive,
+            size: btnSize,
+            iconSize: iconSize,
             onTap: () {
-              setState(() => _isFollowLocked = !_isFollowLocked);
+              setState(() {
+                _isFollowLocked = !_isFollowLocked;
+                _isTargetActive = true;
+              });
               if (_isFollowLocked && _lastLocalPos != null) {
-                mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(_lastLocalPos!.longitude, _lastLocalPos!.latitude)), zoom: 16.5));
+                mapboxMap?.setCamera(CameraOptions(
+                    center: Point(coordinates: Position(_lastLocalPos!.longitude, _lastLocalPos!.latitude)),
+                    zoom: 16.5));
               }
+              Future.delayed(const Duration(seconds: 2), () {
+                if (mounted) setState(() => _isTargetActive = false);
+              });
             },
-            child: Container(
-              width: widget.isEmbedded ? 48 : 64, height: widget.isEmbedded ? 48 : 64,
+          ),
+          const SizedBox(height: 8), // Tighter gap for mini-map
+          _buildMapControlButton(
+            icon: Icons.map_outlined,
+            isActive: _isMapActive,
+            size: btnSize,
+            iconSize: iconSize,
+            onTap: () {
+              setState(() => _isMapActive = true);
+              mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: _balintawakCenter), zoom: 14.5));
+              Future.delayed(const Duration(seconds: 2), () {
+                if (mounted) setState(() => _isMapActive = false);
+              });
+            },
+          ),
+          if (!widget.isMiniMap && !widget.isHistorical) ...[
+            const SizedBox(height: 8),
+            _buildMapControlButton(
+              icon: Icons.alt_route_rounded, // Mas related na icon para sa route optimization
+              isActive: widget.isOptimizing,
+
+              size: btnSize,
+              iconSize: iconSize,
+              showLoading: widget.isOptimizing,
+              onTap: widget.onOptimize,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+
+  Widget _buildMapControlButton({
+    required IconData icon,
+    required bool isActive,
+    required double size,
+    required double iconSize,
+    VoidCallback? onTap, // Optional onTap for flexibility
+    bool showLoading = false, // Added loading support
+  }) {
+
+    return StatefulBuilder(
+      builder: (context, setInnerState) {
+        bool isHovered = false;
+        return MouseRegion(
+          onEnter: (_) => setInnerState(() => isHovered = true),
+          onExit: (_) => setInnerState(() => isHovered = false),
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              width: size,
+              height: size,
               decoration: BoxDecoration(
-                color: _isFollowLocked ? const Color(0xFF00C853) : Colors.white,
+                color: isActive
+                    ? const Color(0xFF00796B)
+                    : (isHovered ? const Color(0xFFE0F2F1) : Colors.white),
                 shape: BoxShape.circle,
                 boxShadow: AppTheme.pulidongShadow,
+                border: Border.all(
+                  color: isActive ? const Color(0xFF00796B) : (isHovered ? const Color(0xFF00796B).withOpacity(0.3) : Colors.transparent),
+                  width: 1.5,
+                ),
               ),
-              child: Icon(
-                _isFollowLocked ? Icons.gps_fixed_rounded : Icons.gps_not_fixed_rounded,
-                color: _isFollowLocked ? Colors.white : const Color(0xFF1A1A1A),
-                size: widget.isEmbedded ? 24 : 28,
+              child: showLoading
+                ? Center(
+                    child: SizedBox(
+                      width: iconSize * 0.8,
+                      height: iconSize * 0.8,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: isActive ? Colors.white : const Color(0xFF00796B),
+                      ),
+                    ),
+                  )
+                : Icon(
+                    icon,
+                    color: isActive ? Colors.white : (isHovered ? const Color(0xFF00796B) : const Color(0xFF1A1A1A)),
+                    size: iconSize,
+                  ),
+
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildDesktopLayout() {
+    return Container(
+      margin: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(40),
+        boxShadow: AppTheme.balancedDeepShadow,
+        border: Border.all(color: const Color(0xFFE0E0E0), width: 2),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          Positioned.fill(child: _buildMap()),
+          _buildCornerHeader(),
+          _buildMapControls(bottom: 32),
+          _buildDebugOverlay(),
+
+          // Floating Info Panel
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeInOutQuart,
+            top: 24,
+            bottom: 24,
+            right: _isFleetPanelVisible ? 24 : -450,
+            child: PointerInterceptor(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 600),
+                curve: Curves.easeInOutCubic,
+                width: 420,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.95),
+                  borderRadius: BorderRadius.circular(32),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 30,
+                      spreadRadius: 5,
+                      offset: const Offset(-10, 0),
+                    )
+                  ],
+                  border: Border.all(color: Colors.white.withOpacity(0.6), width: 1.5),
+                ),
+                child: Column(
+                  children: [
+                    _buildFixedPanelHeader(),
+                    const Divider(height: 1),
+                    if (_isDataLoading)
+                      const Expanded(child: Center(child: CircularProgressIndicator(color: Color(0xFF00796B))))
+                    else
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: const BorderRadius.vertical(bottom: Radius.circular(32)),
+                          child: AnimatedOpacity(
+                            duration: const Duration(milliseconds: 400),
+                            opacity: _isDataExpanded ? 1.0 : 0.0,
+                            child: _buildPanelContent(),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
-          const SizedBox(height: 12),
-          _HoverZoomLink(
-            onTap: () {
-              mapboxMap?.setCamera(CameraOptions(center: Point(coordinates: Position(121.1623, 13.9413)), zoom: 14.5));
-            },
-            child: Container(
-              width: widget.isEmbedded ? 48 : 64, height: widget.isEmbedded ? 48 : 64,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                shape: BoxShape.circle,
-                boxShadow: AppTheme.pulidongShadow,
+
+          // Toggle Tab
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeInOutQuart,
+            top: 0, bottom: 0,
+            right: _isFleetPanelVisible ? 444 : 0,
+            child: Center(
+              child: PointerInterceptor(
+                child: GestureDetector(
+                  onTap: () => setState(() => _isFleetPanelVisible = !_isFleetPanelVisible),
+                  child: Container(
+                    width: 24, height: 80,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00695C),
+                      borderRadius: const BorderRadius.horizontal(left: Radius.circular(16)),
+                      boxShadow: AppTheme.pulidongShadow,
+                    ),
+                    child: Icon(
+                      _isFleetPanelVisible ? Icons.keyboard_arrow_right_rounded : Icons.keyboard_arrow_left_rounded,
+                      size: 18, color: Colors.white,
+                    ),
+                  ),
+                ),
               ),
-              child: Icon(Icons.map_outlined, color: const Color(0xFF1A1A1A), size: widget.isEmbedded ? 24 : 28),
             ),
           ),
         ],
@@ -975,11 +1667,203 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
     );
   }
 
+  Widget _buildPanelContent() {
+    final String currentTruckId = (_user?.preferredTruck != null &&
+            _user!.preferredTruck!.isNotEmpty &&
+            _user!.preferredTruck != "Unknown" &&
+            _user!.preferredTruck != "None")
+        ? _user!.preferredTruck!
+        : (_lastSessionData?['truck_id']?.toString() ?? widget.focusTruckId ?? "Unknown");
+
+    final String currentPlateNumber = (_truckPlateNumber != null &&
+            _truckPlateNumber!.isNotEmpty &&
+            _truckPlateNumber != "N/A")
+        ? _truckPlateNumber!
+        : (_lastSessionData?['plate_number']?.toString() ?? "N/A");
+
+    debugPrint("[DRIVER MAP DEBUG]");
+    debugPrint("driverId = ${_user?.userId}");
+    debugPrint("resolvedTruckId = $currentTruckId");
+    debugPrint("resolvedTruckNumber = $currentTruckId");
+    debugPrint("resolvedPlateNumber = $currentPlateNumber");
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(0, 12, 0, 60), // Increased bottom padding to 60
+      physics: const BouncingScrollPhysics(),
+      children: [
+        _buildInfoCard(
+          title: "Trip Information",
+          icon: Icons.info_outline_rounded,
+          color: AppColors.tealText,
+          isDesktop: true,
+          content: [
+            _buildInfoRow(
+              "Truck Number", 
+              currentTruckId,
+              color: AppColors.tealText
+            ),
+            const Divider(height: 24),
+            _buildInfoRow(
+              "Plate Number", 
+              currentPlateNumber,
+              isBold: true
+            ),
+            const Divider(height: 24),
+            _buildInfoRow("Start Time", _startTime),
+            const Divider(height: 24),
+            _buildInfoRow("Estimated End", _calculateEstimatedEnd()),
+            const Divider(height: 24),
+            _buildInfoRow("Total Distance", "${_distance.toStringAsFixed(1)} km", color: Colors.orangeAccent.shade200),
+          ],
+        ),
+        const SizedBox(height: 20),
+        _buildInfoCard(
+          title: "GPS Status",
+          icon: Icons.gps_fixed_rounded,
+          color: Colors.green, 
+          isDesktop: true,
+          content: [
+            _buildGpsSignalRow(),
+            const Divider(height: 24),
+            _buildInfoRow("Accuracy", _lastLocalPos == null ? "Waiting for fix..." : "±${_lastLocalPos!.accuracy.toInt()} meters"),
+            const Divider(height: 24),
+            _buildInfoRow("Speed", "${_currentSpeed.toStringAsFixed(1)} km/h"),
+            const Divider(height: 24),
+            _buildInfoRow("Last Update", _lastGpsUpdateTime != null ? DateFormat('hh:mm:ss a').format(_lastGpsUpdateTime!) : (_lastLocalPos != null ? DateFormat('hh:mm:ss a').format(_lastLocalPos!.timestamp) : "Waiting...")),
+          ],
+
+        ),
+        const SizedBox(height: 40),
+      ],
+    );
+  }
+
+  Widget _buildCornerHeader() {
+    return Positioned(
+      top: 24, left: 24,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.9),
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: AppTheme.pulidongShadow,
+          border: Border.all(color: Colors.white, width: 2),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("Unit GIS Tracking", style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, letterSpacing: -0.5)),
+            const SizedBox(height: 4),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(width: 8, height: 8, decoration: const BoxDecoration(color: Colors.greenAccent, shape: BoxShape.circle)),
+                const SizedBox(width: 8),
+                const Text("Live telemetry and route monitoring", style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w700)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFixedPanelHeader() {
+    return const Padding(
+      padding: EdgeInsets.fromLTRB(28, 32, 28, 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center, // I-center ang header para sa Web interface
+        children: [
+          Text("Trip Details", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF00796B))),
+          SizedBox(height: 4),
+          Text("Live session telemetry details", textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDebugOverlay() {
+    final bool isDesktop = MediaQuery.of(context).size.width >= 900;
+    return Positioned(
+      top: isDesktop ? 125 : 155,
+      left: isDesktop ? 24 : 16,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.9),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: AppTheme.pulidongShadow,
+          border: Border.all(color: Colors.white, width: 1.5),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildHUDSeparator("SPEED", "${_currentSpeed.toStringAsFixed(0)} km/h"),
+            const SizedBox(width: 12),
+            Container(width: 1.5, height: 16, color: Colors.grey.shade300),
+            const SizedBox(width: 12),
+            _buildHUDSeparator("DIST", "${_distance.toStringAsFixed(1)} km"),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHUDSeparator(String label, String value) {
+    return Row(
+      children: [
+        Text("$label: ", style: TextStyle(color: Colors.grey.shade600, fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
+        Text(value, style: const TextStyle(color: Color(0xFF00796B), fontSize: 12, fontWeight: FontWeight.w900)),
+      ],
+    );
+  }
+
+  Widget _buildMobileLayout() {
+    return Stack(
+      children: [
+        Positioned.fill(child: _buildMap()),
+        _buildFloatingHeader(),
+        _buildLegend(),
+        _buildDebugOverlay(), // Added Telemetry Overlay (Speed and Distance) for mobile layout
+        _buildMapControls(bottom: 200),
+
+        
+        Positioned.fill(
+          child: DraggableScrollableSheet(
+            controller: _sheetController, // Inilagay ang controller dito para gumana ang vertical swipe gesture sa header panel!
+            initialChildSize: 0.22,
+            minChildSize: 0.22,
+            maxChildSize: 0.85,
+            snap: true,
+            snapSizes: const [0.22, 0.45, 0.85],
+            builder: (context, scrollController) => PointerInterceptor(
+
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(40)),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black26, blurRadius: 25, spreadRadius: 5, offset: Offset(0, -5))
+                  ],
+                ),
+                child: _buildSwipeUpContent(scrollController),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildFloatingHeader() {
-    if (widget.isEmbedded) return const SizedBox.shrink();
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double headerFontSize = (screenWidth * 0.045).clamp(16.0, 18.0);
+    final double subFontSize = (screenWidth * 0.025).clamp(9.0, 10.0);
+    final double iconSize = (screenWidth * 0.065).clamp(22.0, 26.0);
 
     return Positioned(
-      top: 24, left: 16, right: 16,
+      top: 12, left: 16, right: 16,
       child: SafeArea(
         child: Row(
           children: [
@@ -1006,30 +1890,42 @@ class _DriverTrackTruckScreenState extends State<DriverTrackTruckScreen> {
                 alignment: Alignment.centerLeft,
                 decoration: BoxDecoration(
                   color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(24),
                   boxShadow: AppTheme.pulidongShadow,
                 ),
-                child: const Column(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text("Live Tracking", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A), letterSpacing: -0.5)),
-                    Text("Live GPS connected", style: TextStyle(fontSize: 9, color: Colors.grey, fontWeight: FontWeight.w600)),
+                    Text(
+                      "Live Tracking", 
+                      style: TextStyle(fontSize: headerFontSize, fontWeight: FontWeight.w900, color: const Color(0xFF1A1A1A), letterSpacing: -0.5)
+                    ),
+                    Text(
+                      _isRefreshing ? "Refreshing map data..." : "Real-time GPS connected", 
+                      style: TextStyle(fontSize: subFontSize, color: _isRefreshing ? const Color(0xFF00796B) : Colors.grey.shade600, fontWeight: FontWeight.w700)
+                    ),
                   ],
                 ),
               ),
             ),
             const SizedBox(width: 12),
-            Container(
-              width: 48,
-              height: 48,
-              decoration: BoxDecoration(
-                color: const Color(0xFF00695C), 
-                shape: BoxShape.circle,
-                boxShadow: AppTheme.pulidongShadow,
-              ), 
-              child: const Icon(Icons.gps_fixed_rounded, color: Colors.white, size: 18)
-            )
+            _HoverZoomLink(
+              onTap: _handleManualRefresh,
+              child: Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: Colors.white, 
+                  shape: BoxShape.circle,
+                  boxShadow: AppTheme.pulidongShadow,
+                ), 
+                child: RotationTransition(
+                  turns: _refreshRotationController,
+                  child: Icon(Icons.refresh_rounded, color: const Color(0xFF00796B), size: iconSize)
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -1071,6 +1967,7 @@ class _HoverZoomLink extends StatefulWidget {
 }
 class _HoverZoomLinkState extends State<_HoverZoomLink> {
   bool _isActive = false;
+
   @override
   Widget build(BuildContext context) {
     bool isEnabled = widget.onTap != null;
@@ -1103,6 +2000,7 @@ class _HoverZoomCard extends StatefulWidget {
 }
 class _HoverZoomCardState extends State<_HoverZoomCard> {
   bool _isActive = false;
+
   @override
   Widget build(BuildContext context) {
     bool isEnabled = widget.onTap != null;

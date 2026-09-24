@@ -4,6 +4,8 @@ import '../api/api_service.dart';
 import '../utils/session_manager.dart';
 import '../utils/app_theme.dart';
 
+import '../widgets/custom_snackbar.dart';
+
 class FileComplaintScreen extends StatefulWidget {
   const FileComplaintScreen({super.key});
 
@@ -29,7 +31,7 @@ class _FileComplaintScreenState extends State<FileComplaintScreen> {
   void _submitComplaint() async {
     final description = _descriptionController.text.trim();
     if (description.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please describe the issue")));
+      CustomSnackBar.show(context, message: "Please describe the issue", isError: true);
       return;
     }
 
@@ -59,14 +61,14 @@ class _FileComplaintScreenState extends State<FileComplaintScreen> {
         }
 
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Complaint submitted successfully")));
+        CustomSnackBar.show(context, message: "Complaint submitted successfully");
         Navigator.pop(context);
       } else {
         throw response.data['message'] ?? "Submission failed";
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
+      CustomSnackBar.show(context, message: "Error: $e", isError: true);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }

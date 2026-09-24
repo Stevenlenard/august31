@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -7,10 +9,18 @@ import '../utils/app_theme.dart';
 import '../widgets/legal_agreement_dialog.dart';
 import '../utils/login_security_manager.dart';
 import '../utils/session_manager.dart';
+import '../utils/responsive.dart';
 import '../widgets/animated_auth_background.dart';
 import '../widgets/hover_action_button.dart';
 import '../widgets/fade_slide_entrance.dart';
 import '../utils/app_localizations.dart';
+import '../utils/custom_notification.dart';
+import '../utils/route_persistence_manager.dart';
+import '../utils/responsive_text.dart';
+import '../widgets/custom_snackbar.dart';
+import '../services/notification_service.dart';
+import 'forgot_password_screen.dart';
+import 'register_choice_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -25,6 +35,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passwordController = TextEditingController();
   bool _isLoading = false;
   bool _obscureText = true;
+  IconData _currentLogoIcon = Icons.local_shipping_rounded;
 
   final FocusNode _usernameFocus = FocusNode();
   final FocusNode _passwordFocus = FocusNode();
@@ -35,12 +46,19 @@ class _LoginScreenState extends State<LoginScreen> {
   SecurityStatus? _securityStatus;
   int _secondsRemaining = 0;
   Timer? _lockoutTimer;
+  final Map<String, Timer?> _errorTimers = {};
 
   @override
   void initState() {
     super.initState();
+    RoutePersistenceManager.saveLastRoute('/');
     _checkSecurityStatus();
     AppLocalizations.currentLanguage.addListener(_onLanguageChanged);
+    
+    // Real-time listeners
+    _usernameController.addListener(_onUsernameChanged);
+    _passwordController.addListener(_onPasswordChanged);
+
     _usernameFocus.addListener(() { 
       if (!_usernameFocus.hasFocus) {
         _validateUsername();
@@ -49,8 +67,51 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() {}); 
     });
     _passwordFocus.addListener(() { 
-      if (!_passwordFocus.hasFocus) _validatePassword();
+      if (!_passwordFocus.hasFocus) {
+        _validatePassword();
+      }
       setState(() {}); 
+    });
+  }
+
+  @override
+  void dispose() {
+    _errorTimers.forEach((_, timer) => timer?.cancel());
+    _usernameController.removeListener(_onUsernameChanged);
+    _passwordController.removeListener(_onPasswordChanged);
+    _usernameFocus.dispose();
+    _passwordFocus.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
+    _lockoutTimer?.cancel();
+    AppLocalizations.currentLanguage.removeListener(_onLanguageChanged);
+    super.dispose();
+  }
+
+  void _setErrorWithTimer(String field, String? errorKey) {
+    setState(() {
+      if (field == 'username') _usernameError = errorKey;
+      if (field == 'password') _passwordError = errorKey;
+    });
+
+    _errorTimers[field]?.cancel();
+    if (errorKey != null) {
+      _errorTimers[field] = Timer(const Duration(seconds: 15), () {
+        if (mounted) {
+          setState(() {
+            if (field == 'username') _usernameError = null;
+            if (field == 'password') _passwordError = null;
+          });
+        }
+      });
+    }
+  }
+
+  void _clearAllErrors() {
+    _errorTimers.forEach((_, timer) => timer?.cancel());
+    setState(() {
+      _usernameError = null;
+      _passwordError = null;
     });
   }
 
@@ -58,43 +119,27 @@ class _LoginScreenState extends State<LoginScreen> {
     if (mounted) setState(() {});
   }
 
-  @override
-  void dispose() {
-    _usernameFocus.dispose();
-    _passwordFocus.dispose();
-    _lockoutTimer?.cancel();
-    AppLocalizations.currentLanguage.removeListener(_onLanguageChanged);
-    super.dispose();
-  }
-
-  void _validateUsername() {
-    final val = _usernameController.text.trim();
-    if (val.isEmpty) {
-      setState(() => _usernameError = AppLocalizations.get('err_username_email'));
-    } else {
+  void _onUsernameChanged() {
+    if (_usernameError != null) {
       setState(() => _usernameError = null);
     }
+    _checkSecurityStatus();
   }
 
-  void _validatePassword() {
-    final val = _passwordController.text;
-    if (val.isEmpty) {
-      setState(() => _passwordError = AppLocalizations.get('err_password_req'));
-    } else {
+  void _onPasswordChanged() {
+    if (_passwordError != null) {
       setState(() => _passwordError = null);
     }
   }
 
-  Future<void> _checkSecurityStatus() async {
-    final username = _usernameController.text.trim();
-    if (username.isEmpty) return;
-
-    final status = await LoginSecurityManager.checkStatus(username);
+  void _checkSecurityStatus() async {
+    final status = await LoginSecurityManager.checkStatus(_usernameController.text.trim());
     if (mounted) {
       setState(() {
         _securityStatus = status;
         if (status.isLocked && status.lockoutUntil != null) {
-          final diff = status.lockoutUntil!.difference(DateTime.now()).inSeconds;
+          final now = DateTime.now();
+          final diff = status.lockoutUntil!.difference(now).inSeconds;
           if (diff > 0) {
             _secondsRemaining = diff;
             _startLockoutTimer();
@@ -157,17 +202,22 @@ class _LoginScreenState extends State<LoginScreen> {
         // Save User to Session
         await SessionManager.saveUser(user);
 
+        // Check for permissions on mobile devices before proceeding
+        if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+          bool hasPermissions = await _checkAndRequestPermissions();
+          if (!hasPermissions) {
+            setState(() => _isLoading = false);
+            return;
+          }
+        }
+
         // Show Welcome Message
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Welcome Back, $name!", style: const TextStyle(fontWeight: FontWeight.bold)),
-            backgroundColor: const Color(0xFF00897B),
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 2),
-            margin: const EdgeInsets.all(20),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-        );
+        if (mounted) {
+          CustomSnackBar.show(
+            context,
+            message: AppLocalizations.get('welcome_name').replaceFirst('{name}', name),
+          );
+        }
 
         if (role == 'admin') {
           Navigator.pushReplacementNamed(context, '/admin_dashboard');
@@ -177,29 +227,52 @@ class _LoginScreenState extends State<LoginScreen> {
           Navigator.pushReplacementNamed(context, '/resident_dashboard', arguments: user);
         }
       } else {
-        await LoginSecurityManager.recordFailedAttempt(username);
-        _checkSecurityStatus();
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(response.data['message'] ?? AppLocalizations.get('err_auth_failed'), style: const TextStyle(fontWeight: FontWeight.bold)),
-            backgroundColor: Colors.redAccent,
-            behavior: SnackBarBehavior.floating,
-            margin: const EdgeInsets.all(20),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-        );
+        // Check if user exists using separate API calls as requested
+        bool userExists = false;
+        try {
+          final userCheck = await ApiService().checkUsername(username);
+          final emailCheck = await ApiService().checkEmail(username);
+          if (userCheck.data['success'] == true || emailCheck.data['success'] == true) {
+            userExists = true;
+          }
+        } catch (e) {
+          debugPrint("Account existence check error: $e");
+          // If check fails, we proceed with generic message
+        }
+
+        if (userExists) {
+          final newStatus = await LoginSecurityManager.recordFailedAttempt(username);
+          _checkSecurityStatus();
+          if (!mounted) return;
+          
+          String msg;
+          if (newStatus.isLocked) {
+            msg = AppLocalizations.get('err_account_locked_final');
+          } else {
+            msg = AppLocalizations.get('err_incorrect_password_attempts')
+                .replaceFirst('{attempts}', newStatus.remainingAttempts.toString());
+          }
+          
+          CustomSnackBar.show(
+            context,
+            message: msg,
+            isError: true,
+          );
+        } else {
+          if (!mounted) return;
+          CustomSnackBar.show(
+            context,
+            message: AppLocalizations.get('err_auth_failed'),
+            isError: true,
+          );
+        }
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(AppLocalizations.get('err_connection'), style: const TextStyle(fontWeight: FontWeight.bold)),
-            backgroundColor: Colors.redAccent,
-            behavior: SnackBarBehavior.floating,
-            margin: const EdgeInsets.all(20),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
+        CustomSnackBar.show(
+          context,
+          message: AppLocalizations.get('err_connection'),
+          isError: true,
         );
       }
     } finally {
@@ -208,80 +281,134 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<bool> _checkAndRequestPermissions() async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    LocationPermission locationPermission = await Geolocator.checkPermission();
-    PermissionStatus notificationStatus = await Permission.notification.status;
-
-    if (!serviceEnabled || 
-        (locationPermission == LocationPermission.denied || locationPermission == LocationPermission.deniedForever) || 
-        !notificationStatus.isGranted) {
+    // 1. Trigger Native Location Prompt
+    try {
+      PermissionStatus locStatus = await Permission.location.request();
       
-      return await _showPermissionDialog();
+      if (!locStatus.isGranted && !locStatus.isLimited) {
+        if (locStatus.isPermanentlyDenied) {
+          if (mounted) {
+            CustomSnackBar.show(context, message: "Location is mandatory. Please enable it in Settings.", isError: true);
+            await Future.delayed(const Duration(seconds: 2));
+            await openAppSettings();
+          }
+        } else {
+          if (mounted) {
+            CustomSnackBar.show(context, message: "Location access is required to use the tracker.", isError: true);
+          }
+        }
+        return false;
+      }
+    } catch (e) {
+      debugPrint("Location permission error: $e");
     }
+
+    // Small delay to ensure OS handles the next prompt correctly
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    // 2. Trigger Native Notification Prompt
+    try {
+      PermissionStatus statusBefore = await Permission.notification.status;
+      
+      if (statusBefore.isDenied || statusBefore.isProvisional) {
+        PermissionStatus statusAfter = await Permission.notification.request();
+        
+        if (statusAfter.isGranted) {
+          await SessionManager.setAppNotificationsEnabled(true);
+          await SessionManager.setNotifPermissionRequested(true);
+          
+          // User clicked ALLOW -> Redirect to App Settings as requested
+          if (mounted) {
+            CustomSnackBar.show(context, message: "Redirecting to system settings...", isError: false);
+            await Future.delayed(const Duration(seconds: 1));
+            await openAppSettings();
+          }
+        } else {
+          // User clicked DON'T ALLOW
+          await SessionManager.setAppNotificationsEnabled(false);
+          await SessionManager.setNotifPermissionRequested(true);
+        }
+      } else if (statusBefore.isGranted) {
+        await SessionManager.setAppNotificationsEnabled(true);
+      }
+      
+    } catch (e) {
+      debugPrint("Notification permission error: $e");
+    }
+
     return true;
   }
 
-  Future<bool> _showPermissionDialog() async {
-    bool? result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
-        child: Padding(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.settings_suggest_rounded, color: AppColors.tealText, size: 52),
-              const SizedBox(height: 24),
-              const Text("Permissions Required", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF1A1A1A))),
-              const SizedBox(height: 16),
-              const Text(
-                "To use the Garbage Tracker, you must enable Location Services and allow Notifications. This ensures real-time tracking and collection alerts work correctly.",
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: Colors.grey, fontWeight: FontWeight.w500, height: 1.5),
-              ),
-              const SizedBox(height: 32),
-              HoverActionButton(
-                text: "Open Settings",
-                onTap: () async {
-                  await openAppSettings();
-                  if (context.mounted) Navigator.pop(context, true);
-                },
-              ),
-              const SizedBox(height: 16),
-              _HoverZoomLink(
-                onTap: () => Navigator.pop(context, false),
-                child: const Text("Go Back", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w700, fontSize: 15)),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    return result ?? false;
-  }
+  // --- REMOVED: _showPermissionDialog helper as requested ---
+
 
   void _showLanguageModal() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (context) {
-        return Container(
-          padding: const EdgeInsets.symmetric(vertical: 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+    final bool isWide = Responsive.isTablet(context) || Responsive.isDesktop(context);
+    
+    if (isWide) {
+      showDialog(
+        context: context,
+        builder: (context) => Dialog(
+          backgroundColor: Colors.white,
+          elevation: 24,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: _buildLanguageContent(context),
+          ),
+        ),
+      );
+    } else {
+      showModalBottomSheet(
+        context: context,
+        backgroundColor: Colors.white,
+        elevation: 16,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+        builder: (context) => _buildLanguageContent(context),
+      );
+    }
+  }
+
+  Widget _buildLanguageContent(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(AppLocalizations.get('select_language'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: AppColors.tealText)),
-              const SizedBox(height: 16),
-              _buildLanguageItem(context, 'English (UK)', AppLanguage.en),
-              _buildLanguageItem(context, 'Filipino', AppLanguage.fil),
-              _buildLanguageItem(context, 'Bisaya', AppLanguage.bis),
+              Text(
+                AppLocalizations.get('select_language'),
+                style: TextStyle(
+                  fontSize: ResponsiveText.getFontSize(context, 20),
+                  fontWeight: FontWeight.w900,
+                  color: AppColors.tealText,
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close_rounded, color: Colors.grey),
+                onPressed: () => Navigator.pop(context),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
             ],
           ),
-        );
-      },
+          const SizedBox(height: 8),
+          Text(
+            AppLocalizations.get('language_selection_desc'),
+            style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500),
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 0),
+            child: Divider(height: 32),
+          ),
+          _buildLanguageItem(context, 'English (UK)', AppLanguage.en),
+          _buildLanguageItem(context, 'Filipino', AppLanguage.fil),
+          _buildLanguageItem(context, 'Bisaya', AppLanguage.bis),
+        ],
+      ),
     );
   }
 
@@ -291,113 +418,194 @@ class _LoginScreenState extends State<LoginScreen> {
       title: Text(label, style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.inputLabel)),
       leading: Icon(Icons.language_rounded, color: isSelected ? AppColors.tealText : Colors.grey),
       trailing: isSelected ? const Icon(Icons.check_circle, color: AppColors.tealText) : null,
-      onTap: () {
-        AppLocalizations.setLanguage(lang);
-        Navigator.pop(context);
+      onTap: () async {
+        await AppLocalizations.setLanguage(lang);
+        if (context.mounted) {
+          Navigator.pop(context);
+          CustomNotification.showTopNotification(
+            context, 
+            "Successfully changed language to $label.", 
+            false
+          );
+        }
       },
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double screenHeight = MediaQuery.of(context).size.height;
+    final double keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
+    final bool isMobile = Responsive.isMobile(context);
+    
     return AnimatedAuthBackground(
-      child: SafeArea(
-        child: ScrollConfiguration(
-          behavior: const ScrollBehavior().copyWith(scrollbars: false),
-          child: CustomScrollView(
-            physics: const BouncingScrollPhysics(),
-            slivers: [
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      resizeToAvoidBottomInset: false,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        resizeToAvoidBottomInset: false,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              // Main Scrollable Content
+              Positioned.fill(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: screenWidth > 600 ? screenWidth * 0.1 : 24,
+                    vertical: screenHeight * 0.02,
+                  ),
                   child: Column(
                     children: [
-                      const Spacer(flex: 2),
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 400),
-                        child: Column(
-                          children: [
-                            FadeSlideEntrance(
-                              delay: const Duration(milliseconds: 200),
-                              child: _buildBranding(),
-                            ),
-                            const SizedBox(height: 32),
-                            
-                            FadeSlideEntrance(
-                              delay: const Duration(milliseconds: 400),
-                              child: Container(
-                                padding: const EdgeInsets.all(28),
-                                decoration: AppDecorations.authCardDecoration(), // Applied High-Depth Shadow
-                                child: Form(
-                                  key: _formKey,
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      if (_securityStatus?.isLocked == true && _secondsRemaining > 0) _buildLockoutCard(),
-                                      _buildRefinedTextField(
-                                        label: AppLocalizations.get('username_email'),
-                                        hint: AppLocalizations.get('enter_credentials'),
-                                        controller: _usernameController,
-                                        icon: Icons.person_outline_rounded,
-                                        focus: _usernameFocus,
-                                        error: _usernameError,
-                                      ),
-                                      const SizedBox(height: 24),
-                                      _buildRefinedTextField(
-                                        label: AppLocalizations.get('password'),
-                                        hint: AppLocalizations.get('enter_password'),
-                                        controller: _passwordController,
-                                        isPassword: true,
-                                        obscureText: _obscureText,
-                                        onTogglePassword: () => setState(() => _obscureText = !_obscureText),
-                                        icon: Icons.lock_outline_rounded,
-                                        focus: _passwordFocus,
-                                        error: _passwordError,
-                                      ),
-                                      const SizedBox(height: 12),
-                                      Align(
-                                        alignment: Alignment.centerRight,
-                                        child: _HoverZoomLink(
-                                          onTap: () => Navigator.pushNamed(context, '/forgot_password'),
-                                          child: Text(AppLocalizations.get('forgot_password'), style: const TextStyle(color: AppColors.tealLink, fontWeight: FontWeight.w700, fontSize: 13)),
+                      SizedBox(height: screenHeight * 0.02),
+                      _buildBranding(),
+                      SizedBox(height: screenHeight * 0.03),
+                      FadeSlideEntrance(
+                        key: const ValueKey('login_form_container'),
+                        delay: const Duration(milliseconds: 400),
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 450),
+                            child: Container(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: screenWidth > 600 ? 32 : 24,
+                                vertical: screenHeight * 0.02,
+                              ),
+                              decoration: AppDecorations.authCardDecoration(),
+                              child: Form(
+                                key: _formKey,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (_securityStatus?.isLocked == true && _secondsRemaining > 0) _buildLockoutCard(),
+                                    _buildRefinedTextField(
+                                      label: AppLocalizations.get('username_email'),
+                                      hint: AppLocalizations.get('enter_credentials'),
+                                      controller: _usernameController,
+                                      icon: Icons.person_outline_rounded,
+                                      focus: _usernameFocus,
+                                      error: _usernameError,
+                                    ),
+                                    const SizedBox(height: 16),
+                                    _buildRefinedTextField(
+                                      label: AppLocalizations.get('password'),
+                                      hint: AppLocalizations.get('enter_password'),
+                                      controller: _passwordController,
+                                      isPassword: true,
+                                      obscureText: _obscureText,
+                                      onTogglePassword: () => setState(() => _obscureText = !_obscureText),
+                                      icon: Icons.lock_outline_rounded,
+                                      focus: _passwordFocus,
+                                      error: _passwordError,
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Align(
+                                      alignment: Alignment.centerRight,
+                                      child: _HoverZoomLink(
+                                        onTap: () {
+                                          _clearAllErrors();
+                                          setState(() => _currentLogoIcon = Icons.lock_reset_rounded);
+                                          Future.delayed(const Duration(milliseconds: 150), () {
+                                            if (!mounted) return;
+                                            Navigator.push(
+                                              context,
+                                              PageRouteBuilder(
+                                                pageBuilder: (context, animation, secondaryAnimation) => const ForgotPasswordScreen(),
+                                                transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                                                  return FadeTransition(
+                                                    opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
+                                                    child: child,
+                                                  );
+                                                },
+                                                transitionDuration: const Duration(milliseconds: 500),
+                                              ),
+                                            ).then((_) {
+                                              if (mounted) setState(() => _currentLogoIcon = Icons.local_shipping_rounded);
+                                            });
+                                          });
+                                        },
+                                        child: Text(
+                                          AppLocalizations.get('forgot_password'),
+                                          style: ResponsiveText.link(context, color: AppColors.tealLink).copyWith(fontSize: ResponsiveText.getFontSize(context, 13)),
                                         ),
                                       ),
-                                      const SizedBox(height: 32),
-                                      HoverActionButton(
-                                        text: AppLocalizations.get('sign_in'),
-                                        loadingText: AppLocalizations.get('confirming_credentials'),
-                                        onTap: _handleLogin,
-                                        isLoading: _isLoading,
+                                    ),
+                                    const SizedBox(height: 24),
+                                    HoverActionButton(
+                                      text: AppLocalizations.get('sign_in'),
+                                      loadingText: AppLocalizations.get('confirming_credentials'),
+                                      onTap: _handleLogin,
+                                      isLoading: _isLoading,
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Align(
+                                      alignment: Alignment.center,
+                                      child: Wrap(
+                                        crossAxisAlignment: WrapCrossAlignment.center,
+                                          children: [
+                                            Text(AppLocalizations.get('dont_have_account'), style: ResponsiveText.body(context)),
+                                            const SizedBox(width: 8),
+                                            _HoverZoomLink(
+                                              onTap: () {
+                                                _clearAllErrors();
+                                                setState(() => _currentLogoIcon = Icons.person_add_rounded);
+                                                Future.delayed(const Duration(milliseconds: 150), () {
+                                                  if (!mounted) return;
+                                                  Navigator.push(
+                                                    context,
+                                                    PageRouteBuilder(
+                                                      pageBuilder: (context, animation, secondaryAnimation) => const RegisterChoiceScreen(),
+                                                      transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                                                        return FadeTransition(
+                                                          opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
+                                                          child: child,
+                                                        );
+                                                      },
+                                                      transitionDuration: const Duration(milliseconds: 500),
+                                                    ),
+                                                  ).then((_) {
+                                                    if (mounted) setState(() => _currentLogoIcon = Icons.local_shipping_rounded);
+                                                  });
+                                                });
+                                              },
+                                              child: Text(AppLocalizations.get('create_account'), style: ResponsiveText.link(context)),
+                                            ),
+                                          ],
                                       ),
-                                      const SizedBox(height: 24),
-                                      Row(
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: [
-                                          Text(AppLocalizations.get('dont_have_account'), style: const TextStyle(color: AppColors.textGray, fontSize: 13)),
-                                          _HoverZoomLink(
-                                            onTap: () => Navigator.pushNamed(context, '/register'),
-                                            child: Text(AppLocalizations.get('create_account'), style: const TextStyle(color: AppColors.tealLink, fontWeight: FontWeight.w900, fontSize: 13)),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ),
-                          ],
+                          ),
                         ),
                       ),
-                      const Spacer(flex: 4), 
-                      FadeSlideEntrance(
-                        delay: const Duration(milliseconds: 600),
-                        child: _buildFooter(),
-                      ),
+                      // Footer inside scroll for Web/Tablet
+                      if (!isMobile) ...[
+                        const SizedBox(height: 60),
+                        _buildFooter(),
+                        const SizedBox(height: 20),
+                      ],
+                      // Spacer for the keyboard - aligns form with keyboard top
+                      SizedBox(height: keyboardHeight),
+                      // Extra buffer for mobile fixed footer when keyboard is closed
+                      if (isMobile && keyboardHeight == 0) const SizedBox(height: 120),
                     ],
                   ),
                 ),
               ),
+              
+              // Fixed Footer for Mobile
+              if (isMobile)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 20,
+                  child: FadeSlideEntrance(
+                    delay: const Duration(milliseconds: 600),
+                    child: _buildFooter(),
+                  ),
+                ),
             ],
           ),
         ),
@@ -405,18 +613,28 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  void _validateUsername() {
+    final val = _usernameController.text.trim();
+    _setErrorWithTimer('username', val.isEmpty ? 'err_username_email' : null);
+  }
+
+  void _validatePassword() {
+    final val = _passwordController.text;
+    _setErrorWithTimer('password', val.isEmpty ? 'err_password_req' : null);
+  }
+
   Widget _buildLockoutCard() {
     return Container(
       margin: const EdgeInsets.only(bottom: 24), padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.red.shade200, width: 1.5)),
       child: Column(children: [
-        Row(children: [Icon(Icons.lock_clock_rounded, color: Colors.red.shade900, size: 20), const SizedBox(width: 12), Expanded(child: Text('Security Lockout', style: TextStyle(color: Colors.red.shade900, fontWeight: FontWeight.bold)))]),
+        Row(children: [Icon(Icons.lock_clock_rounded, color: Colors.red.shade900, size: 20), const SizedBox(width: 12), Expanded(child: Text(AppLocalizations.get('security_lockout'), style: TextStyle(color: Colors.red.shade900, fontWeight: FontWeight.bold)))]),
         const SizedBox(height: 8),
-        Text('Login is temporarily disabled due to multiple failed attempts.', textAlign: TextAlign.center, style: TextStyle(color: Colors.red.shade900, fontSize: 12, fontWeight: FontWeight.w500)),
+        Text(AppLocalizations.get('err_account_locked_final'), textAlign: TextAlign.center, style: TextStyle(color: Colors.red.shade900, fontSize: 12, fontWeight: FontWeight.w500)),
         const SizedBox(height: 8),
         Text('${(_secondsRemaining ~/ 60).toString().padLeft(2, '0')}:${(_secondsRemaining % 60).toString().padLeft(2, '0')}', style: TextStyle(color: Colors.red.shade900, fontSize: 22, fontWeight: FontWeight.w900, fontFamily: 'monospace')),
         const SizedBox(height: 12),
-        _HoverZoomLink(onTap: () => Navigator.pushNamed(context, '/forgot_password'), child: Text('Reset your password', style: TextStyle(color: Colors.red.shade900, fontSize: 13, fontWeight: FontWeight.bold, decoration: TextDecoration.underline))),
+        _HoverZoomLink(onTap: () => Navigator.pushNamed(context, '/forgot_password'), child: Text(AppLocalizations.get('reset_password_link'), style: TextStyle(color: Colors.red.shade900, fontSize: 13, fontWeight: FontWeight.bold, decoration: TextDecoration.underline))),
       ]),
     );
   }
@@ -424,42 +642,108 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildBranding() {
     return Column(
       children: [
-        Container(
-          width: 84, height: 84,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(colors: [AppColors.loginButtonStart, AppColors.loginButtonEnd], begin: Alignment.topLeft, end: Alignment.bottomRight),
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(color: AppColors.loginButtonEnd.withAlpha(60), blurRadius: 20, offset: const Offset(0, 10)),
-            ],
-          ),
-          child: const Icon(Icons.local_shipping_rounded, size: 44, color: Colors.white),
-        ),
-        const SizedBox(height: 24),
-        Text(
-          AppLocalizations.get('garbage_tracker'), 
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: AppColors.tealText, letterSpacing: -1.2)
-        ),
-        Text(
-          AppLocalizations.get('welcome_back'), 
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 16, color: AppColors.textGray, fontWeight: FontWeight.w600, letterSpacing: 0.5)
-        ),
-        const SizedBox(height: 12),
-        _HoverZoomLink(
-          onTap: _showLanguageModal,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                AppLocalizations.currentLanguage.value == AppLanguage.en ? 'English (UK)' : 
-                (AppLocalizations.currentLanguage.value == AppLanguage.fil ? 'Filipino' : 'Bisaya'),
-                style: const TextStyle(color: AppColors.textGray, fontWeight: FontWeight.w700, fontSize: 13, decoration: TextDecoration.underline),
+        Hero(
+          tag: 'app_logo',
+          flightShuttleBuilder: (flightContext, animation, flightDirection, fromHeroContext, toHeroContext) {
+            final Hero fromHero = fromHeroContext.widget as Hero;
+            final Hero toHero = toHeroContext.widget as Hero;
+            final Widget fromChild = fromHero.child;
+            final Widget toChild = toHero.child;
+
+            return AnimatedBuilder(
+              animation: animation,
+              builder: (context, child) {
+                final double scale = 1.0 + (0.1 * (1.0 - (animation.value - 0.5).abs() * 2));
+                final double rotation = (flightDirection == HeroFlightDirection.push ? 1 : -1) * 
+                                      (1.0 - animation.value) * 0.2;
+                
+                return Transform.scale(
+                  scale: scale,
+                  child: Transform.rotate(
+                    angle: rotation,
+                    child: Material(
+                      type: MaterialType.transparency,
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Opacity(
+                            opacity: (1.0 - animation.value).clamp(0.0, 1.0),
+                            child: fromChild,
+                          ),
+                          Opacity(
+                            opacity: animation.value.clamp(0.0, 1.0),
+                            child: toChild,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+          child: Container(
+            width: ResponsiveText.getIconSize(context, 80),
+            height: ResponsiveText.getIconSize(context, 80),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(colors: [AppColors.loginButtonStart, AppColors.loginButtonEnd], begin: Alignment.topLeft, end: Alignment.bottomRight),
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(color: AppColors.loginButtonEnd.withAlpha(60), blurRadius: 20, offset: const Offset(0, 10)),
+              ],
+            ),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 300),
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: ScaleTransition(scale: animation, child: child),
               ),
-              const SizedBox(width: 4),
-              const Icon(Icons.keyboard_arrow_down_rounded, color: AppColors.textGray, size: 18),
-            ],
+              child: Icon(
+                _currentLogoIcon, 
+                key: ValueKey(_currentLogoIcon),
+                size: ResponsiveText.getIconSize(context, 40), 
+                color: Colors.white
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Hero(
+          tag: 'app_name',
+          child: Material(
+            color: Colors.transparent,
+            child: Text(
+              AppLocalizations.get('garbage_tracker'), 
+              textAlign: TextAlign.center,
+              style: ResponsiveText.brandingTitle(context),
+            ),
+          ),
+        ),
+        FadeSlideEntrance(
+          delay: const Duration(milliseconds: 200),
+          child: Text(
+            AppLocalizations.get('welcome_back'), 
+            textAlign: TextAlign.center,
+            style: ResponsiveText.brandingSubtitle(context),
+          ),
+        ),
+        const SizedBox(height: 20),
+        FadeSlideEntrance(
+          delay: const Duration(milliseconds: 300),
+          child: _HoverZoomLink(
+            onTap: _showLanguageModal,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  AppLocalizations.currentLanguage.value == AppLanguage.en ? 'English (UK)' :
+                  (AppLocalizations.currentLanguage.value == AppLanguage.fil ? 'Filipino' : 'Bisaya'),
+                  style: const TextStyle(color: AppColors.textGray, fontWeight: FontWeight.w700, fontSize: 13, decoration: TextDecoration.underline),
+                ),
+                const SizedBox(width: 4),
+                const Icon(Icons.keyboard_arrow_down_rounded, color: AppColors.textGray, size: 18),
+              ],
+            ),
           ),
         ),
       ],
@@ -469,21 +753,22 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildFooter() {
     return Column(children: [
       Wrap(alignment: WrapAlignment.center, spacing: 16, children: [
-        _HoverZoomLink(onTap: () => LegalAgreementDialog.show(context, isTerms: true), child: Text(AppLocalizations.get('terms_conditions'), style: const TextStyle(color: AppColors.tealLink, fontSize: 12, fontWeight: FontWeight.bold, decoration: TextDecoration.underline))),
-        const Text('•', style: TextStyle(color: AppColors.textGray)),
-        _HoverZoomLink(onTap: () => LegalAgreementDialog.show(context, isTerms: false), child: Text(AppLocalizations.get('privacy_policy'), style: const TextStyle(color: AppColors.tealLink, fontSize: 12, fontWeight: FontWeight.bold, decoration: TextDecoration.underline))),
+        _HoverZoomLink(onTap: () => LegalAgreementDialog.show(context, isTerms: true), child: Text(AppLocalizations.get('terms_conditions'), style: ResponsiveText.footer(context, bold: true).copyWith(decoration: TextDecoration.underline))),
+        Text('•', style: ResponsiveText.footer(context)),
+        _HoverZoomLink(onTap: () => LegalAgreementDialog.show(context, isTerms: false), child: Text(AppLocalizations.get('privacy_policy'), style: ResponsiveText.footer(context, bold: true).copyWith(decoration: TextDecoration.underline))),
       ]),
       const SizedBox(height: 16),
-      const Text('© 2026 Brgy. Balintawak Lipa City', style: TextStyle(color: Color(0xFF00796B), fontSize: 12, fontWeight: FontWeight.bold)),
-      const Text('All rights reserved', style: TextStyle(color: Color(0xFF00796B), fontSize: 10)),
+      Text(AppLocalizations.get('brgy_footer'), style: ResponsiveText.footer(context, bold: true)),
+      Text(AppLocalizations.get('all_rights_reserved'), style: ResponsiveText.footer(context, size: 10)),
     ]);
   }
 
   Widget _buildRefinedTextField({required String label, required String hint, required TextEditingController controller, IconData? icon, bool isPassword = false, bool obscureText = false, VoidCallback? onTogglePassword, FocusNode? focus, String? error}) {
     bool hasFocus = focus?.hasFocus ?? false;
+    String? localizedError = error != null ? AppLocalizations.get(error) : null;
     
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Padding(padding: const EdgeInsets.only(left: 4, bottom: 8), child: Text(label, style: const TextStyle(color: AppColors.inputLabel, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 0.2))),
+      Padding(padding: const EdgeInsets.only(left: 4, bottom: 6), child: Text(label, style: ResponsiveText.inputLabel(context))),
       AnimatedContainer(
         duration: const Duration(milliseconds: 300),
         decoration: BoxDecoration(
@@ -500,15 +785,15 @@ class _LoginScreenState extends State<LoginScreen> {
         child: TextFormField(
           controller: controller, focusNode: focus, obscureText: isPassword ? obscureText : false,
           cursorColor: const Color(0xFF424242),
-          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.inputLabel),
+          style: ResponsiveText.inputText(context),
           textInputAction: isPassword ? TextInputAction.done : TextInputAction.next,
           onFieldSubmitted: (_) { if (isPassword) _handleLogin(); },
           decoration: InputDecoration(
             hintText: hint, hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14, fontWeight: FontWeight.w400),
             prefixIcon: icon != null ? Icon(icon, color: hasFocus ? AppColors.tealText : AppColors.tealText.withAlpha(150), size: 20) : null,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18), filled: true, fillColor: hasFocus ? Colors.white : Colors.grey.shade50,
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: error != null ? Colors.redAccent : Colors.grey.shade200, width: 1.2)),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: error != null ? Colors.redAccent : AppColors.tealText, width: 2.0)),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16), filled: true, fillColor: hasFocus ? Colors.white : Colors.grey.shade50,
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: localizedError != null ? Colors.redAccent : Colors.grey.shade200, width: 1.2)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: localizedError != null ? Colors.redAccent : AppColors.tealText, width: 2.0)),
             suffixIcon: isPassword ? 
               IconButton(
                 icon: AnimatedSwitcher(
@@ -520,7 +805,7 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
       ),
-      if (error != null) Padding(padding: const EdgeInsets.only(top: 6, left: 4), child: Text(error, style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.w600))),
+      if (localizedError != null) Padding(padding: const EdgeInsets.only(top: 4, left: 4), child: Text(localizedError, style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.w600))),
     ]);
   }
 }

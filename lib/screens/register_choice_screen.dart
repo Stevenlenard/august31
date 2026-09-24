@@ -4,6 +4,10 @@ import '../widgets/legal_agreement_dialog.dart';
 import '../widgets/animated_auth_background.dart';
 import '../widgets/fade_slide_entrance.dart';
 import '../utils/app_localizations.dart';
+import '../utils/responsive_text.dart';
+import '../utils/responsive.dart';
+import 'resident_register.dart';
+import 'driver_register.dart';
 
 class RegisterChoiceScreen extends StatefulWidget {
   const RegisterChoiceScreen({super.key});
@@ -13,6 +17,8 @@ class RegisterChoiceScreen extends StatefulWidget {
 }
 
 class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
+  IconData _currentLogoIcon = Icons.person_add_rounded;
+
   @override
   void initState() {
     super.initState();
@@ -31,76 +37,124 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double screenHeight = MediaQuery.of(context).size.height;
+    final double keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
+    final bool isMobile = Responsive.isMobile(context);
+    
     return AnimatedAuthBackground(
-      child: SafeArea(
-        child: ScrollConfiguration(
-          behavior: const ScrollBehavior().copyWith(scrollbars: false),
-          child: CustomScrollView(
-            physics: const BouncingScrollPhysics(),
-            slivers: [
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      resizeToAvoidBottomInset: false,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        resizeToAvoidBottomInset: false,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              // Main Scrollable Content
+              Positioned.fill(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: screenWidth > 600 ? 40 : 24,
+                    vertical: screenHeight * 0.02,
+                  ),
                   child: Column(
                     children: [
+                      // Header Spacer for fixed back button
+                      const SizedBox(height: 60),
                       FadeSlideEntrance(
+                        key: const ValueKey('reg_choice_branding'),
                         delay: const Duration(milliseconds: 100),
-                        child: Align(
-                          alignment: Alignment.topLeft,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: Colors.white.withAlpha(150),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: IconButton(
-                              icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Color(0xFF00796B), size: 20),
-                              onPressed: () => Navigator.pop(context),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const Spacer(flex: 2),
-                      FadeSlideEntrance(
-                        delay: const Duration(milliseconds: 300),
                         child: _buildBranding(),
                       ),
                       const SizedBox(height: 48),
-                      // Options
-                      FadeSlideEntrance(
-                        delay: const Duration(milliseconds: 500),
-                        child: _buildChoiceCard(
-                          context: context,
-                          title: AppLocalizations.get('resident'),
-                          subtitle: AppLocalizations.get('track_trucks'),
-                          icon: Icons.home_rounded,
-                          iconColor: const Color(0xFF2196F3),
-                          bgColor: const Color(0xFFE3F2FD),
-                          route: '/register_resident',
+                      // Options (Always Vertical Stack as requested)
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 450),
+                        child: Column(
+                          children: [
+                            FadeSlideEntrance(
+                              key: const ValueKey('reg_choice_resident_col'),
+                              delay: const Duration(milliseconds: 200),
+                              child: _buildChoiceCard(
+                                context: context,
+                                title: AppLocalizations.get('resident'),
+                                subtitle: AppLocalizations.get('track_trucks'),
+                                icon: Icons.home_rounded,
+                                iconColor: const Color(0xFF2196F3),
+                                bgColor: const Color(0xFFE3F2FD),
+                                route: '/register_resident',
+                              ),
+                            ),
+                            const SizedBox(height: 20),
+                            FadeSlideEntrance(
+                              key: const ValueKey('reg_choice_driver_col'),
+                              delay: const Duration(milliseconds: 300),
+                              child: _buildChoiceCard(
+                                context: context,
+                                title: AppLocalizations.get('driver'),
+                                subtitle: AppLocalizations.get('manage_routes'),
+                                icon: Icons.local_shipping_rounded,
+                                iconColor: const Color(0xFF4CAF50),
+                                bgColor: const Color(0xFFE8F5E9),
+                                route: '/register_driver',
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 20),
-                      FadeSlideEntrance(
-                        delay: const Duration(milliseconds: 600),
-                        child: _buildChoiceCard(
-                          context: context,
-                          title: AppLocalizations.get('driver'),
-                          subtitle: AppLocalizations.get('manage_routes'),
-                          icon: Icons.local_shipping_rounded,
-                          iconColor: const Color(0xFF4CAF50),
-                          bgColor: const Color(0xFFE8F5E9),
-                          route: '/register_driver',
+
+                      // Footer inside scroll for Web/Tablet
+                      if (!isMobile) ...[
+                        const SizedBox(height: 80), // Adjusted spacing for Web
+                        FadeSlideEntrance(
+                          key: const ValueKey('reg_choice_footer'),
+                          delay: const Duration(milliseconds: 800),
+                          child: _buildFooter(context),
                         ),
-                      ),
-                      const Spacer(flex: 4),
-                      FadeSlideEntrance(
-                        delay: const Duration(milliseconds: 800),
-                        child: _buildFooter(context),
-                      ),
+                        const SizedBox(height: 40),
+                      ],
+                      // Keyboard Spacer
+                      SizedBox(height: keyboardHeight),
+                      // Extra buffer for mobile fixed footer
+                      if (isMobile && keyboardHeight == 0) const SizedBox(height: 120),
                     ],
                   ),
                 ),
               ),
+
+              // Fixed Back Button (Reverted to fixed top-left position)
+              Positioned(
+                top: 20,
+                left: 24,
+                child: FadeSlideEntrance(
+                  key: const ValueKey('reg_choice_back'),
+                  delay: const Duration(milliseconds: 100),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withAlpha(150),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: IconButton(
+                      icon: Icon(Icons.arrow_back_ios_new_rounded, color: const Color(0xFF00796B), size: ResponsiveText.getIconSize(context, 20)),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ),
+                ),
+              ),
+
+              // Fixed Footer for Mobile
+              if (isMobile)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 20,
+                  child: FadeSlideEntrance(
+                    key: const ValueKey('reg_choice_footer_mobile'),
+                    delay: const Duration(milliseconds: 800),
+                    child: _buildFooter(context),
+                  ),
+                ),
             ],
           ),
         ),
@@ -109,23 +163,79 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
   }
 
   Widget _buildBranding() {
+    final double containerSize = ResponsiveText.getIconSize(context, 80);
+    final double iconSize = ResponsiveText.getIconSize(context, 40);
+
     return Column(
       children: [
-        Container(
-          width: 84, height: 84,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(colors: [AppColors.loginButtonStart, AppColors.loginButtonEnd], begin: Alignment.topLeft, end: Alignment.bottomRight),
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(color: AppColors.loginButtonEnd.withAlpha(60), blurRadius: 20, offset: const Offset(0, 10)),
-              BoxShadow(color: Colors.white.withAlpha(100), blurRadius: 2, spreadRadius: -2),
-            ],
+        Hero(
+          tag: 'app_logo',
+          flightShuttleBuilder: (flightContext, animation, flightDirection, fromHeroContext, toHeroContext) {
+            final Hero fromHero = fromHeroContext.widget as Hero;
+            final Hero toHero = toHeroContext.widget as Hero;
+            final Widget fromChild = fromHero.child;
+            final Widget toChild = toHero.child;
+
+            return AnimatedBuilder(
+              animation: animation,
+              builder: (context, child) {
+                final double scale = 1.0 + (0.1 * (1.0 - (animation.value - 0.5).abs() * 2));
+                final double rotation = (flightDirection == HeroFlightDirection.push ? 1 : -1) * 
+                                      (1.0 - animation.value) * 0.2;
+                
+                return Transform.scale(
+                  scale: scale,
+                  child: Transform.rotate(
+                    angle: rotation,
+                    child: Material(
+                      type: MaterialType.transparency,
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Opacity(
+                            opacity: (1.0 - animation.value).clamp(0.0, 1.0),
+                            child: fromChild,
+                          ),
+                          Opacity(
+                            opacity: animation.value.clamp(0.0, 1.0),
+                            child: toChild,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+          child: Container(
+            width: containerSize,
+            height: containerSize,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(colors: [AppColors.loginButtonStart, AppColors.loginButtonEnd], begin: Alignment.topLeft, end: Alignment.bottomRight),
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(color: AppColors.loginButtonEnd.withAlpha(60), blurRadius: 20, offset: const Offset(0, 10)),
+              ],
+            ),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 300),
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: ScaleTransition(scale: animation, child: child),
+              ),
+              child: Icon(
+                _currentLogoIcon, 
+                key: ValueKey(_currentLogoIcon),
+                size: iconSize, 
+                color: Colors.white
+              ),
+            ),
           ),
-          child: const Icon(Icons.person_add_rounded, size: 44, color: Colors.white),
         ),
         const SizedBox(height: 24),
-        Text(AppLocalizations.get('create_account'), style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: AppColors.tealText, letterSpacing: -1.2)),
-        Text(AppLocalizations.get('select_type'), style: const TextStyle(fontSize: 16, color: AppColors.textGray, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
+        Text(AppLocalizations.get('create_account'), style: ResponsiveText.brandingTitle(context)),
+        Text(AppLocalizations.get('select_type'), style: ResponsiveText.brandingSubtitle(context)),
       ],
     );
   }
@@ -140,7 +250,27 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
     required String route,
   }) {
     return _HoverZoomCard(
-      onTap: () => Navigator.pushNamed(context, route),
+      onTap: () {
+        setState(() => _currentLogoIcon = route == '/register_resident' ? Icons.home_rounded : Icons.local_shipping_rounded);
+        Future.delayed(const Duration(milliseconds: 150), () {
+          if (!mounted) return;
+          Navigator.push(
+            context,
+            PageRouteBuilder(
+              pageBuilder: (context, animation, secondaryAnimation) => route == '/register_resident' ? const ResidentRegisterScreen() : const DriverRegisterScreen(),
+              transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                return FadeTransition(
+                  opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
+                  child: child,
+                );
+              },
+              transitionDuration: const Duration(milliseconds: 500),
+            ),
+          ).then((_) {
+            if (mounted) setState(() => _currentLogoIcon = Icons.person_add_rounded);
+          });
+        });
+      },
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 16),
         constraints: const BoxConstraints(maxWidth: 400),
@@ -150,13 +280,13 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
           child: Row(
             children: [
               Container(
-                width: 60,
-                height: 60,
+                width: ResponsiveText.getIconSize(context, 60),
+                height: ResponsiveText.getIconSize(context, 60),
                 decoration: BoxDecoration(
                   color: bgColor,
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: Icon(icon, color: iconColor, size: 30),
+                child: Icon(icon, color: iconColor, size: ResponsiveText.getIconSize(context, 30)),
               ),
               const SizedBox(width: 20),
               Expanded(
@@ -165,21 +295,12 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
                   children: [
                     Text(
                       title,
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w900,
-                        color: Color(0xFF1A1A1A),
-                        letterSpacing: -0.5,
-                      ),
+                      style: ResponsiveText.screenHeader(context).copyWith(fontSize: ResponsiveText.getFontSize(context, 20), letterSpacing: -0.5),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       subtitle,
-                      style: const TextStyle(
-                        color: Color(0xFF757575),
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: ResponsiveText.body(context),
                     ),
                   ],
                 ),
@@ -195,13 +316,13 @@ class _RegisterChoiceScreenState extends State<RegisterChoiceScreen> {
   Widget _buildFooter(BuildContext context) {
     return Column(children: [
       Wrap(alignment: WrapAlignment.center, spacing: 16, children: [
-        _HoverZoomLink(onTap: () => LegalAgreementDialog.show(context, isTerms: true), child: Text(AppLocalizations.get('terms_conditions'), style: const TextStyle(color: AppColors.tealLink, fontSize: 12, fontWeight: FontWeight.bold, decoration: TextDecoration.underline))),
-        const Text('•', style: TextStyle(color: AppColors.textGray)),
-        _HoverZoomLink(onTap: () => LegalAgreementDialog.show(context, isTerms: false), child: Text(AppLocalizations.get('privacy_policy'), style: const TextStyle(color: AppColors.tealLink, fontSize: 12, fontWeight: FontWeight.bold, decoration: TextDecoration.underline))),
+        _HoverZoomLink(onTap: () => LegalAgreementDialog.show(context, isTerms: true), child: Text(AppLocalizations.get('terms_conditions'), style: ResponsiveText.footer(context, bold: true).copyWith(decoration: TextDecoration.underline))),
+        Text('•', style: ResponsiveText.footer(context)),
+        _HoverZoomLink(onTap: () => LegalAgreementDialog.show(context, isTerms: false), child: Text(AppLocalizations.get('privacy_policy'), style: ResponsiveText.footer(context, bold: true).copyWith(decoration: TextDecoration.underline))),
       ]),
       const SizedBox(height: 16),
-      const Text('© 2026 Brgy. Balintawak Lipa City', style: TextStyle(color: Color(0xFF00796B), fontSize: 12, fontWeight: FontWeight.bold)),
-      const Text('All rights reserved', style: TextStyle(color: Color(0xFF00796B), fontSize: 10)),
+      Text(AppLocalizations.get('brgy_footer'), style: ResponsiveText.footer(context, bold: true)),
+      Text(AppLocalizations.get('all_rights_reserved'), style: ResponsiveText.footer(context, size: 10)),
     ]);
   }
 }

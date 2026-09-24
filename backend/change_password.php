@@ -90,7 +90,7 @@ try {
                 echo json_encode(["success" => false, "message" => "Database update failed"]);
             }
         } else {
-            echo json_encode(["success" => false, "message" => "Incorrect old password (Mali ang lumang password)"]);
+            echo json_encode(["success" => false, "message" => "Incorrect current password"]);
         }
     } else {
         echo json_encode(["success" => false, "message" => "User not found"]);

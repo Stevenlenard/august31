@@ -66,6 +66,10 @@ class _HoverActionButtonState extends State<HoverActionButton> with SingleTicker
                  widget.text.toLowerCase().contains("reject") ||
                  widget.text.toLowerCase().contains("archive");
 
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double fontSize = (screenWidth * 0.045).clamp(14.0, 18.0);
+    final double loadingFontSize = (screenWidth * 0.04).clamp(12.0, 16.0);
+
     return MouseRegion(
       onEnter: (_) => setState(() => _isActive = isEnabled),
       onExit: (_) => setState(() => _isActive = false),
@@ -94,22 +98,13 @@ class _HoverActionButtonState extends State<HoverActionButton> with SingleTicker
                         : [Colors.grey.shade400, Colors.grey.shade500],
                   ),
               borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                if (isEnabled && _isActive) // Only show shadow when active/hovered to avoid static line artifacts
-                  BoxShadow(
-                    color: widget.color?.withAlpha(60) ?? (isRed ? Colors.red.withAlpha(60) : AppColors.loginButtonEnd.withAlpha(60)),
-                    blurRadius: 16,
-                    offset: const Offset(0, 8),
-                    spreadRadius: -2, // Negative spread helps avoid "border-like" edge artifacts
-                  ),
-              ],
             ),
             alignment: Alignment.center,
             child: widget.isLoading
-                ? _buildLoadingContent()
+                ? _buildLoadingContent(loadingFontSize)
                 : Text(
                     widget.text,
-                    style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w900, letterSpacing: 1),
+                    style: TextStyle(color: Colors.white, fontSize: fontSize, fontWeight: FontWeight.w900, letterSpacing: 1),
                   ),
           ),
         ),
@@ -117,7 +112,7 @@ class _HoverActionButtonState extends State<HoverActionButton> with SingleTicker
     );
   }
 
-  Widget _buildLoadingContent() {
+  Widget _buildLoadingContent(double fontSize) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -133,7 +128,7 @@ class _HoverActionButtonState extends State<HoverActionButton> with SingleTicker
         const SizedBox(width: 12),
         Text(
           widget.loadingText ?? 'Processing...',
-          style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700, letterSpacing: 0.5),
+          style: TextStyle(color: Colors.white, fontSize: fontSize, fontWeight: FontWeight.w700, letterSpacing: 0.5),
         ),
       ],
     );

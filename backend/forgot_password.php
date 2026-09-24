@@ -64,19 +64,39 @@ try {
 
         // Content
         $mail->isHTML(true);
-        $mail->Subject = 'Reset Your Password - Garbage Tracker';
+        $mail->Subject = 'Password Reset OTP - Garbage Tracker';
         $mail->Body    = "
-            <div style='font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd;'>
-                <h2 style='color: #2c3e50;'>Password Reset Request</h2>
-                <p>Hello,</p>
-                <p>We received a request to reset your password for the <strong>Garbage Tracker</strong> app.</p>
-                <p>Your verification code is:</p>
-                <div style='background: #f4f4f4; padding: 15px; font-size: 24px; font-weight: bold; text-align: center; letter-spacing: 5px; color: #e74c3c;'>
-                    $otp
+            <div style='font-family: \"Segoe UI\", Tahoma, Geneva, Verdana, sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #e0f2f1; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05);'>
+                <div style='background-color: #00796B; padding: 25px; text-align: center;'>
+                    <h1 style='color: #ffffff; margin: 0; font-size: 24px; letter-spacing: 1px;'>Garbage Tracker</h1>
+                    <p style='color: #b2dfdb; margin: 5px 0 0 0; font-size: 14px;'>Security Verification | Pagpapatunay ng Seguridad</p>
                 </div>
-                <p>This code will expire in <strong>3 minutes</strong>. If you did not request this, please ignore this email.</p>
-                <hr style='border: 0; border-top: 1px solid #eee;'>
-                <p style='font-size: 12px; color: #7f8c8d;'>This is an automated message, please do not reply.</p>
+                <div style='padding: 30px; background-color: #ffffff;'>
+                    <!-- English Section -->
+                    <h2 style='color: #1a1a1a; margin-top: 0; font-size: 18px;'>Reset Your Password</h2>
+                    <p style='color: #757575; line-height: 1.6; font-size: 14px;'>We received a request to access your account recovery. Please use the following One-Time Password (OTP) to proceed.</p>
+
+                    <!-- Tagalog Section -->
+                    <hr style='border: 0; border-top: 1px dashed #e0e0e0; margin: 20px 0;'>
+                    <h2 style='color: #1a1a1a; margin-top: 0; font-size: 18px;'>I-reset ang Iyong Password</h2>
+                    <p style='color: #757575; line-height: 1.6; font-size: 14px;'>Nakatanggap kami ng kahilingan para sa pagbawi ng iyong account. Gamitin ang sumusunod na One-Time Password (OTP) para magpatuloy.</p>
+
+                    <div style='background-color: #f5f5f5; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0;'>
+                        <span style='display: block; color: #757575; font-size: 11px; margin-bottom: 8px; text-transform: uppercase; font-weight: bold;'>Verification Code | Kodigo sa Pagpapatunay</span>
+                        <span style='color: #00796B; font-size: 36px; font-weight: 900; letter-spacing: 8px; font-family: monospace;'>$otp</span>
+                    </div>
+
+                    <div style='background-color: #fff9c4; border-left: 4px solid #fbc02d; padding: 12px 15px; margin-bottom: 20px;'>
+                        <p style='color: #5d4037; margin: 0; font-size: 13px;'><strong>Note:</strong> Valid for <strong>3 minutes</strong> only.</p>
+                        <p style='color: #5d4037; margin: 5px 0 0 0; font-size: 13px;'><strong>Paalala:</strong> Valid ito sa loob ng <strong>3 minuto</strong> lamang.</p>
+                    </div>
+
+                    <p style='color: #9e9e9e; font-size: 12px; line-height: 1.5;'>If you did not request this, please ignore this email. | Kung hindi mo ito hiniling, pakibalewala ang email na ito.</p>
+                </div>
+                <div style='background-color: #fafafa; padding: 20px; text-align: center; border-top: 1px solid #eeeeee;'>
+                    <p style='color: #00796B; margin: 0; font-size: 12px; font-weight: bold;'>Brgy. Balintawak, Lipa City</p>
+                    <p style='color: #9e9e9e; margin: 5px 0 0 0; font-size: 11px;'>&copy; 2026 Garbage Tracker System. All rights reserved.</p>
+                </div>
             </div>
         ";
 

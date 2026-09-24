@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' hide Size;
 import 'utils/app_localizations.dart';
+import 'services/notification_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/admin_dashboard.dart';
 import 'screens/resident_dashboard.dart';
@@ -16,12 +18,21 @@ import 'screens/file_complaint_screen.dart';
 import 'screens/resident_track_truck_screen.dart';
 import 'screens/forgot_password_screen.dart';
 import 'screens/verify_2fa_screen.dart';
+import 'screens/splash_screen.dart';
 
 void main() async {
+  // Trigger Rebuild
   WidgetsFlutterBinding.ensureInitialized();
   
+  // Use path URL strategy for clean URLs on web
+  usePathUrlStrategy();
+
   // Initialize Localizations
   await AppLocalizations.init();
+
+  // Initialize Notifications
+  await NotificationService.init();
+  NotificationService.startPersistentListening();
 
   // Set Mapbox Access Token
   MapboxOptions.setAccessToken("pk.eyJ1IjoicHJpbmNlNjcwMyIsImEiOiJjbW9zeHB2ODIwNDFnMnRwdWxsam9sYWJmIn0.8DQhyf9Z9-yP8lCuP2WS3g");
@@ -47,12 +58,15 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Garbage Tracker',
+      debugShowCheckedModeBanner: false,
+      restorationScopeId: 'app',
       theme: ThemeData(
         primarySwatch: Colors.green,
         useMaterial3: true,
       ),
-      initialRoute: '/',
+      initialRoute: '/splash',
       routes: {
+        '/splash': (context) => const SplashScreen(),
         '/': (context) => const LoginScreen(),
         '/admin_dashboard': (context) => const AdminDashboard(),
         '/resident_dashboard': (context) => const ResidentDashboard(),

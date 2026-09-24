@@ -4,7 +4,12 @@ import '../utils/app_theme.dart';
 
 class AnimatedAuthBackground extends StatefulWidget {
   final Widget child;
-  const AnimatedAuthBackground({super.key, required this.child});
+  final bool resizeToAvoidBottomInset;
+  const AnimatedAuthBackground({
+    super.key, 
+    required this.child,
+    this.resizeToAvoidBottomInset = true,
+  });
 
   @override
   State<AnimatedAuthBackground> createState() => _AnimatedAuthBackgroundState();
@@ -33,6 +38,7 @@ class _AnimatedAuthBackgroundState extends State<AnimatedAuthBackground> with Si
     final size = MediaQuery.of(context).size;
     
     return Scaffold(
+      resizeToAvoidBottomInset: widget.resizeToAvoidBottomInset,
       body: Stack(
         children: [
           // Base "Palabo na Palinaw" Gradient (Green & White)

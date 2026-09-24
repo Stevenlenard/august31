@@ -112,4 +112,51 @@ class AppTheme {
       offset: Offset(0, 5),
     ),
   ];
+
+  // Balanced Shadows (Visible on all sides: Top, Bottom, Left, Right)
+  static const List<BoxShadow> balancedPulidongShadow = [
+    BoxShadow(
+      color: Color(0x14000000), // 8% black
+      blurRadius: 20,
+      offset: Offset(0, 0), // ZERO OFFSET for balance
+      spreadRadius: 2,
+    ),
+    BoxShadow(
+      color: Color(0x0A000000), // 4% black
+      blurRadius: 10,
+      offset: Offset(0, 0),
+      spreadRadius: 1,
+    ),
+  ];
+
+  static const List<BoxShadow> balancedDeepShadow = [
+    BoxShadow(
+      color: Color(0x1F000000), // 12% black
+      blurRadius: 30,
+      offset: Offset(0, 0),
+      spreadRadius: 4,
+    ),
+    BoxShadow(
+      color: Color(0x0D000000), // 5% black
+      blurRadius: 15,
+      offset: Offset(0, 0),
+      spreadRadius: 2,
+    ),
+  ];
+
+  // NEW: Ultra Highlighted Balanced Shadow for maximum pop
+  static const List<BoxShadow> highIntensityBalancedShadow = [
+    BoxShadow(
+      color: Color(0x26000000), // 15% black
+      blurRadius: 40,
+      offset: Offset(0, 0),
+      spreadRadius: 5,
+    ),
+    BoxShadow(
+      color: Color(0x14000000), // 8% black
+      blurRadius: 20,
+      offset: Offset(0, 0),
+      spreadRadius: 2,
+    ),
+  ];
 }
